@@ -1,0 +1,738 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#101812">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ターゲットスコア">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-180.png">
+  <title>ターゲットスコア</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #101812;
+      color: #f3f5ef;
+      font-synthesis: none;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 18px 14px 36px; }
+    main { width: min(100%, 620px); margin: 0 auto; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 0 16px; }
+    h1 { font-size: 1.35rem; margin: 0; letter-spacing: .02em; }
+    .eyebrow { color: #9baa97; font-size: .75rem; margin: 0 0 4px; }
+    .status { display: inline-flex; align-items: center; gap: 7px; color: #c4cfbf; font-size: .8rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #778273; }
+    .status[data-state="active"] .dot { background: #a7e278; box-shadow: 0 0 10px #a7e27880; }
+    .status[data-state="error"] .dot { background: #ff8276; }
+    .card { background: #1b251e; border: 1px solid #2d3b30; border-radius: 16px; overflow: hidden; }
+    .camera { position: relative; background: #080c09; aspect-ratio: 4 / 3; overflow: hidden; }
+    video, canvas#overlay { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    video { object-fit: fill; }
+    canvas#overlay { pointer-events: auto; }
+    .camera-hint { position: absolute; z-index: 1; bottom: 10px; left: 10px; right: 10px; text-align: center; color: white; font-size: .77rem; text-shadow: 0 1px 5px #000; pointer-events: none; }
+    .camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: #9baa97; font-size: .9rem; }
+    .controls { display: flex; flex-wrap: wrap; gap: 9px; padding: 12px; }
+    button { border: 0; border-radius: 11px; min-height: 44px; padding: 0 15px; background: #2a382d; color: #f3f5ef; font: inherit; font-size: .88rem; font-weight: 650; cursor: pointer; touch-action: manipulation; }
+    button.primary { flex: 1 1 180px; background: #a7e278; color: #152012; }
+    button:disabled { opacity: .48; cursor: not-allowed; }
+    button:active:not(:disabled) { transform: scale(.98); }
+    .score-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+    .stat { padding: 14px 16px; }
+    .label { color: #a9b5a4; font-size: .76rem; }
+    .value { font-size: 1.8rem; font-weight: 750; line-height: 1.2; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .value small { font-size: .85rem; color: #a9b5a4; font-weight: 500; }
+    .rapid-timer { font-size: 2rem; font-weight: 750; font-variant-numeric: tabular-nums; color: #b9ee94; }
+    select { min-height: 44px; padding: 0 34px 0 12px; border: 1px solid #405344; border-radius: 10px; background: #253128; color: #f3f5ef; font: inherit; }
+    .rapid-controls { display: flex; gap: 9px; align-items: center; }
+    .rapid-controls button { flex: 1; }
+    .section { margin-top: 12px; padding: 15px 16px; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+    h2 { font-size: .98rem; margin: 0; }
+    .muted { color: #a9b5a4; font-size: .76rem; line-height: 1.55; }
+    .setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: #dce3d8; font-size: .85rem; }
+    input[type="range"] { width: 46%; accent-color: #a7e278; }
+    .hits { display: grid; gap: 7px; }
+    .hit { display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; border-radius: 9px; background: #253128; font-size: .86rem; }
+    .hit strong { color: #b9ee94; }
+    .empty { color: #93a08e; text-align: center; padding: 12px 0 4px; font-size: .82rem; }
+    .notice { margin: 12px 2px 0; color: #9baa97; font-size: .75rem; line-height: 1.6; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    @media (max-width: 600px) {
+      body { padding: max(12px, env(safe-area-inset-top)) 12px max(24px, env(safe-area-inset-bottom)); }
+      header { align-items: flex-start; }
+      .status { padding-top: 5px; font-size: .72rem; }
+      .controls button { flex: 1 1 140px; }
+      .rapid-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .rapid-controls select { width: 100%; min-width: 0; }
+      .rapid-controls button { grid-column: 1 / -1; width: 100%; }
+      .section { padding: 14px; }
+    }
+    @media (max-width: 380px) { body { padding-inline: 10px; } .controls { padding: 9px; } button { padding-inline: 11px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><p class="eyebrow">AIRSOFT · LIVE SCORING</p><h1>ターゲットスコア</h1></div>
+      <div id="status" class="status" data-state="idle" role="status"><span class="dot"></span><span id="statusText">カメラ未接続</span></div>
+    </header>
+
+    <section class="card" aria-label="カメラとターゲット">
+      <div id="camera" class="camera">
+        <video id="video" autoplay muted playsinline aria-label="ライブカメラ映像"></video>
+        <canvas id="overlay" aria-label="検出ターゲット。タップして中心と大きさを調整"></canvas>
+        <div id="placeholder" class="camera-placeholder">カメラを起動すると、ここにターゲットが表示されます。</div>
+        <div id="cameraHint" class="camera-hint">的全体が画面に入るようにカメラを固定してください</div>
+      </div>
+      <div class="controls">
+        <button id="cameraButton" class="primary">カメラを起動</button>
+        <button id="findButton" disabled>的を自動検出</button>
+        <button id="monitorButton" disabled>監視を開始</button>
+      </div>
+    </section>
+
+    <div class="score-row">
+      <section class="card stat"><div class="label">合計得点</div><div class="value"><span id="total">0</span><small> 点</small></div></section>
+      <section class="card stat"><div class="label">命中数</div><div class="value"><span id="count">0</span><small> 発</small></div></section>
+    </div>
+
+    <section class="card section" aria-label="射撃トレーニング">
+      <div class="section-heading"><h2 id="trainingTitle">早撃ちチャレンジ</h2><span id="rapidTimer" class="rapid-timer" role="timer" aria-live="off">00:30</span></div>
+      <p id="trainingDescription" class="muted">紙の的にカメラを固定して練習します。準備時間のカウントダウン後、制限時間内の命中を計測します。</p>
+      <div class="rapid-controls">
+        <label class="sr-only" for="trainingMode">練習モード</label>
+        <select id="trainingMode" aria-label="練習モード">
+          <option value="rapid" selected>早撃ち</option>
+          <option value="accuracy">静止精度</option>
+        </select>
+        <label class="sr-only" for="rapidCountdown">準備時間</label>
+        <select id="rapidCountdown" aria-label="早撃ちの準備時間">
+          <option value="3" selected>準備 3秒</option>
+          <option value="5">準備 5秒</option>
+          <option value="10">準備 10秒</option>
+          <option value="15">準備 15秒</option>
+          <option value="30">準備 30秒</option>
+        </select>
+        <label class="sr-only" for="shotLimit">命中数上限</label>
+        <select id="shotLimit" aria-label="命中数上限">
+          <option value="1">1発</option>
+          <option value="3">3発</option>
+          <option value="5" selected>5発</option>
+          <option value="10">10発</option>
+        </select>
+        <label class="sr-only" for="rapidDuration">制限時間</label>
+        <select id="rapidDuration" aria-label="早撃ちの制限時間">
+          <option value="15">15秒</option>
+          <option value="30" selected>30秒</option>
+          <option value="60">60秒</option>
+          <option value="120">120秒</option>
+        </select>
+        <button id="rapidButton" class="primary" disabled>早撃ちスタート</button>
+      </div>
+      <p id="trainingResult" class="muted" aria-live="polite">設定した命中数に達するか、制限時間が終わると自動で結果を表示します。</p>
+    </section>
+
+    <section class="card section">
+      <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
+      <p class="muted">自動検出後、映像の的をタップすると中心を合わせられます。タップした位置を中心に、もう一度タップすると的の大きさを調整できます。</p>
+      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
+      <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
+    </section>
+
+    <section class="card section">
+      <div class="section-heading"><h2>命中履歴</h2><button id="undoButton" disabled>取り消し</button></div>
+      <div id="hits" class="hits"><div class="empty">監視を開始すると、新しいBB弾の穴を記録します。</div></div>
+      <div class="controls" style="padding:12px 0 0">
+        <button id="resetButton" disabled>スコアをリセット</button>
+        <button id="stopButton" disabled>カメラを停止</button>
+      </div>
+    </section>
+    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。カメラを固定し、監視開始後に撃ってください。照明や手ブレで誤検出することがあるため、結果を目視で確認してください。</p>
+    <div id="liveMessage" class="sr-only" aria-live="polite"></div>
+    <canvas id="work" class="sr-only"></canvas>
+  </main>
+  <script>
+    (() => {
+      const video = document.getElementById("video");
+      const overlay = document.getElementById("overlay");
+      const overlayCtx = overlay.getContext("2d");
+      const work = document.getElementById("work");
+      const workCtx = work.getContext("2d", { willReadFrequently: true });
+      const status = document.getElementById("status");
+      const statusText = document.getElementById("statusText");
+      const cameraButton = document.getElementById("cameraButton");
+      const findButton = document.getElementById("findButton");
+      const monitorButton = document.getElementById("monitorButton");
+      const rapidButton = document.getElementById("rapidButton");
+      const trainingMode = document.getElementById("trainingMode");
+      const trainingTitle = document.getElementById("trainingTitle");
+      const trainingDescription = document.getElementById("trainingDescription");
+      const trainingResult = document.getElementById("trainingResult");
+      const shotLimit = document.getElementById("shotLimit");
+      const rapidDuration = document.getElementById("rapidDuration");
+      const rapidCountdown = document.getElementById("rapidCountdown");
+      const rapidTimer = document.getElementById("rapidTimer");
+      const stopButton = document.getElementById("stopButton");
+      const resetButton = document.getElementById("resetButton");
+      const undoButton = document.getElementById("undoButton");
+      const sensitivity = document.getElementById("sensitivity");
+      const sensitivityValue = document.getElementById("sensitivityValue");
+      const targetState = document.getElementById("targetState");
+      const placeholder = document.getElementById("placeholder");
+      const cameraHint = document.getElementById("cameraHint");
+      const hitsElement = document.getElementById("hits");
+      const totalElement = document.getElementById("total");
+      const countElement = document.getElementById("count");
+      const liveMessage = document.getElementById("liveMessage");
+      let stream = null;
+      let target = null;
+      let baseline = null;
+      let monitoring = false;
+      let loopId = null;
+      let frameCount = 0;
+      let hits = [];
+      let previousCandidates = [];
+      let tapStage = 0;
+      let rapidPhase = "idle";
+      let countdownId = null;
+      let rapidIntervalId = null;
+      let rapidDeadline = 0;
+
+      function setStatus(text, state) {
+        statusText.textContent = text;
+        status.dataset.state = state;
+      }
+
+      function dimensions() {
+        const rect = overlay.getBoundingClientRect();
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const width = Math.max(1, Math.round(rect.width * dpr));
+        const height = Math.max(1, Math.round(rect.height * dpr));
+        if (overlay.width !== width || overlay.height !== height) {
+          overlay.width = width;
+          overlay.height = height;
+          drawOverlay();
+        }
+        return { width, height };
+      }
+
+      function drawOverlay() {
+        if (!overlay.width || !overlay.height) return;
+        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+        if (!target) return;
+        const { width, height } = overlay;
+        const x = target.x * width;
+        const y = target.y * height;
+        const radius = target.r * Math.min(width, height);
+        overlayCtx.save();
+        const rings = [
+          { radius: 1, color: "rgba(255,255,255,.10)" },
+          { radius: .8, color: "rgba(255,255,255,.16)" },
+          { radius: .56, color: "rgba(65,91,255,.2)" },
+          { radius: .39, color: "rgba(0,104,210,.23)" },
+          { radius: .2, color: "rgba(255,215,55,.28)" },
+          { radius: .1, color: "rgba(255,58,50,.38)" }
+        ];
+        overlayCtx.lineWidth = Math.max(1.5, width / 320);
+        for (const ring of rings) {
+          overlayCtx.beginPath();
+          overlayCtx.arc(x, y, radius * ring.radius, 0, Math.PI * 2);
+          overlayCtx.fillStyle = ring.color;
+          overlayCtx.fill();
+          overlayCtx.strokeStyle = "rgba(15,20,18,.9)";
+          overlayCtx.stroke();
+        }
+        const labelRadius = radius;
+        const labels = [
+          { score: "5", distance: .9 },
+          { score: "6", distance: .68 },
+          { score: "7", distance: .475 },
+          { score: "8", distance: .295 },
+          { score: "9", distance: .15 }
+        ];
+        overlayCtx.font = `600 ${Math.max(12, Math.min(20, width / 24))}px -apple-system, sans-serif`;
+        overlayCtx.textAlign = "center";
+        overlayCtx.textBaseline = "middle";
+        overlayCtx.lineWidth = Math.max(2, width / 160);
+        overlayCtx.strokeStyle = "rgba(255,255,255,.85)";
+        overlayCtx.fillStyle = "#111";
+        for (const label of labels) {
+          for (const direction of [-1, 1]) {
+            const labelX = x + direction * labelRadius * label.distance;
+            overlayCtx.strokeText(label.score, labelX, y);
+            overlayCtx.fillText(label.score, labelX, y);
+          }
+        }
+        overlayCtx.fillStyle = "#111";
+        overlayCtx.strokeText("10", x, y);
+        overlayCtx.fillText("10", x, y);
+        overlayCtx.restore();
+      }
+
+      function videoImage(size = 320) {
+        if (!video.videoWidth || !video.videoHeight) return null;
+        const scale = Math.min(size / video.videoWidth, size / video.videoHeight, 1);
+        const width = Math.max(1, Math.round(video.videoWidth * scale));
+        const height = Math.max(1, Math.round(video.videoHeight * scale));
+        work.width = width;
+        work.height = height;
+        workCtx.drawImage(video, 0, 0, width, height);
+        return { width, height, data: workCtx.getImageData(0, 0, width, height).data };
+      }
+
+      function findCircle(image) {
+        const { width, height, data } = image;
+        const minSide = Math.min(width, height);
+        const step = Math.max(2, Math.round(minSide / 100));
+        const maxRadius = Math.floor(minSide * 0.44);
+        const minRadius = Math.floor(minSide * 0.15);
+        const radiusScores = new Map();
+        const gray = (x, y) => {
+          const i = (Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))) * 4;
+          return (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+        };
+        for (let cy = Math.floor(minSide * .1); cy < height - minSide * .1; cy += step) {
+          for (let cx = Math.floor(minSide * .1); cx < width - minSide * .1; cx += step) {
+            for (let r = minRadius; r <= maxRadius; r += step) {
+              if (cx - r < 2 || cy - r < 2 || cx + r >= width - 2 || cy + r >= height - 2) continue;
+              let contrast = 0;
+              let samples = 0;
+              for (let n = 0; n < 24; n++) {
+                const angle = n * Math.PI / 12;
+                const dx = Math.cos(angle), dy = Math.sin(angle);
+                contrast += Math.abs(gray(cx + dx * (r - 2), cy + dy * (r - 2)) - gray(cx + dx * (r + 2), cy + dy * (r + 2)));
+                samples++;
+              }
+              const score = contrast / samples;
+              const radiusCandidate = radiusScores.get(r);
+              if (!radiusCandidate || score > radiusCandidate.score) {
+                radiusScores.set(r, { x: cx / width, y: cy / height, r: r / minSide, score });
+              }
+            }
+          }
+        }
+        const candidates = Array.from(radiusScores.values());
+        const strongest = candidates.reduce((score, candidate) => Math.max(score, candidate.score), 0);
+        if (strongest < 18) return null;
+        return candidates
+          .filter(candidate => candidate.score >= strongest * .85)
+          .reduce((largest, candidate) => candidate.r > largest.r ? candidate : largest);
+      }
+
+      function sampleGray(data, width, height, x, y) {
+        const i = (y * width + x) * 4;
+        return data[i] * .299 + data[i + 1] * .587 + data[i + 2] * .114;
+      }
+
+      function detectCandidates(image) {
+        const { width, height, data } = image;
+        const minSide = Math.min(width, height);
+        const centerX = target.x * width;
+        const centerY = target.y * height;
+        const radius = target.r * minSide;
+        const step = Math.max(1, Math.round(minSide / 260));
+        const threshold = Number(sensitivity.value);
+        const cols = Math.ceil(width / step);
+        const rows = Math.ceil(height / step);
+        const mask = new Uint8Array(cols * rows);
+        for (let gy = 0; gy < rows; gy++) {
+          const y = Math.min(height - 1, gy * step);
+          for (let gx = 0; gx < cols; gx++) {
+            const x = Math.min(width - 1, gx * step);
+            const dx = x - centerX, dy = y - centerY;
+            if (dx * dx + dy * dy > radius * radius * .96) continue;
+            const index = y * width + x;
+            const oldGray = sampleGray(baseline.data, width, height, x, y);
+            const gray = sampleGray(data, width, height, x, y);
+            if (oldGray > 95 && oldGray - gray > threshold) mask[gy * cols + gx] = 1;
+          }
+        }
+        const seen = new Uint8Array(mask.length);
+        const candidates = [];
+        for (let i = 0; i < mask.length; i++) {
+          if (!mask[i] || seen[i]) continue;
+          const queue = [i];
+          seen[i] = 1;
+          let head = 0, area = 0, sx = 0, sy = 0;
+          while (head < queue.length) {
+            const p = queue[head++];
+            const gx = p % cols, gy = Math.floor(p / cols);
+            area++;
+            sx += Math.min(width - 1, gx * step);
+            sy += Math.min(height - 1, gy * step);
+            const neighbors = [p - 1, p + 1, p - cols, p + cols];
+            for (const q of neighbors) {
+              if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
+              if ((q === p - 1 && gx === 0) || (q === p + 1 && gx === cols - 1)) continue;
+              seen[q] = 1;
+              queue.push(q);
+            }
+          }
+          const areaPixels = area * step * step;
+          const minArea = Math.max(5, minSide * minSide * .000035);
+          const maxArea = minSide * minSide * .008;
+          if (areaPixels < minArea || areaPixels > maxArea) continue;
+          const x = sx / area / width, y = sy / area / height;
+          if (Math.hypot((x * width - centerX), (y * height - centerY)) > radius * .98) continue;
+          candidates.push({ x, y });
+        }
+        return candidates;
+      }
+
+      function scoreHit(point) {
+        const minSide = Math.min(video.videoWidth, video.videoHeight);
+        const distance = Math.hypot((point.x - target.x) * video.videoWidth, (point.y - target.y) * video.videoHeight);
+        const normalized = distance / (target.r * minSide);
+        if (normalized > 1) return 0;
+        if (normalized <= .1) return 10;
+        if (normalized <= .2) return 9;
+        if (normalized <= .39) return 8;
+        if (normalized <= .56) return 7;
+        if (normalized <= .8) return 6;
+        return 5;
+      }
+
+      function renderHits() {
+        const total = hits.reduce((sum, hit) => sum + hit.score, 0);
+        totalElement.textContent = String(total);
+        countElement.textContent = String(hits.length);
+        undoButton.disabled = hits.length === 0;
+        resetButton.disabled = hits.length === 0;
+        if (!hits.length) {
+          hitsElement.innerHTML = '<div class="empty">監視を開始すると、新しいBB弾の穴を記録します。</div>';
+          return;
+        }
+        hitsElement.replaceChildren(...hits.slice().reverse().map((hit, index) => {
+          const row = document.createElement("div");
+          row.className = "hit";
+          const label = document.createElement("span");
+          label.textContent = `命中 ${hits.length - index}`;
+          const score = document.createElement("strong");
+          score.textContent = `${hit.score} 点`;
+          row.append(label, score);
+          return row;
+        }));
+      }
+
+      function monitorFrame() {
+        if (!monitoring || !baseline || !target || video.readyState < 2) return;
+        const image = videoImage(320);
+        if (!image) return;
+        frameCount++;
+        if (frameCount % 2 === 0) {
+          const candidates = detectCandidates(image);
+          for (const candidate of candidates) {
+            const matchedPrevious = previousCandidates.some(old => Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12);
+            if (matchedPrevious) continue;
+            const nearRecorded = hits.some(hit => Math.hypot((hit.x - candidate.x) * image.width, (hit.y - candidate.y) * image.height) < 14);
+            if (nearRecorded) continue;
+            const score = scoreHit(candidate);
+            if (score > 0) {
+              hits.push({ ...candidate, score });
+              renderHits();
+              liveMessage.textContent = `${score}点で命中を検出しました`;
+              if (hits.length >= Number(shotLimit.value) && rapidPhase === "running") {
+                finishTrainingRound("shots");
+                return;
+              }
+            }
+          }
+          previousCandidates = candidates;
+        }
+        loopId = window.setTimeout(monitorFrame, 450);
+      }
+
+      function formatTime(seconds) {
+        const minutes = Math.floor(seconds / 60);
+        const remainder = seconds % 60;
+        return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+      }
+
+      function currentTrainingName() {
+        return trainingMode.value === "accuracy" ? "静止精度チャレンジ" : "早撃ち";
+      }
+
+      function startTrainingLabel() {
+        return trainingMode.value === "accuracy" ? "精度チャレンジ開始" : "早撃ちスタート";
+      }
+
+      function updateTrainingMode() {
+        const accuracy = trainingMode.value === "accuracy";
+        trainingTitle.textContent = accuracy ? "静止精度チャレンジ" : "早撃ちチャレンジ";
+        trainingDescription.textContent = accuracy
+          ? "紙の的とカメラを固定して練習します。設定した発数または制限時間までの平均得点を記録します。"
+          : "紙の的とカメラを固定して練習します。設定した発数または制限時間までの命中を計測します。";
+        rapidButton.textContent = startTrainingLabel();
+        trainingResult.textContent = accuracy
+          ? "設定した命中数に達するか、制限時間が終わると自動終了し、平均得点を表示します。"
+          : "設定した命中数に達するか、制限時間が終わると自動終了します。";
+        if (rapidPhase === "finished" || rapidPhase === "idle") {
+          rapidPhase = "idle";
+          rapidTimer.textContent = formatTime(Number(rapidDuration.value));
+        }
+      }
+
+      function startRapidRound() {
+        if (rapidPhase === "countdown") {
+          stopMonitoring();
+          liveMessage.textContent = `${currentTrainingName()}をキャンセルしました`;
+          return;
+        }
+        if (rapidPhase === "running") {
+          stopMonitoring();
+          liveMessage.textContent = `${currentTrainingName()}を途中終了しました`;
+          return;
+        }
+        if (!target || video.readyState < 2) {
+          liveMessage.textContent = "始めるには、カメラを起動して紙の的を検出してください。";
+          targetState.textContent = "先にカメラと的を準備してください";
+          return;
+        }
+        if (monitoring || rapidPhase === "running") return;
+        const countdownSeconds = Number(rapidCountdown.value);
+        const countdownEnds = Date.now() + countdownSeconds * 1000;
+        rapidPhase = "countdown";
+        rapidDuration.disabled = true;
+        rapidCountdown.disabled = true;
+        shotLimit.disabled = true;
+        trainingMode.disabled = true;
+        rapidButton.textContent = "キャンセル";
+        rapidTimer.textContent = String(countdownSeconds);
+        trainingResult.textContent = "準備してください…";
+        liveMessage.textContent = `${countdownSeconds}秒後に${currentTrainingName()}を開始します`;
+        countdownId = window.setInterval(() => {
+          const remaining = countdownEnds - Date.now();
+          if (remaining <= 0) {
+            window.clearInterval(countdownId);
+            countdownId = null;
+            rapidPhase = "running";
+            rapidDeadline = Date.now() + Number(rapidDuration.value) * 1000;
+            rapidButton.textContent = `${currentTrainingName()}を終了`;
+            if (!beginMonitoring()) {
+              rapidPhase = "idle";
+              rapidTimer.textContent = formatTime(Number(rapidDuration.value));
+              rapidButton.textContent = startTrainingLabel();
+              rapidDuration.disabled = false;
+              rapidCountdown.disabled = false;
+              shotLimit.disabled = false;
+              trainingMode.disabled = false;
+              return;
+            }
+            updateRapidTimer();
+            rapidIntervalId = window.setInterval(updateRapidTimer, 100);
+            return;
+          }
+          rapidTimer.textContent = String(Math.ceil(remaining / 1000));
+        }, 100);
+      }
+
+      function updateRapidTimer() {
+        const remaining = Math.max(0, Math.ceil((rapidDeadline - Date.now()) / 1000));
+        rapidTimer.textContent = formatTime(remaining);
+        if (remaining > 0) return;
+        finishTrainingRound("time");
+      }
+
+      function finishTrainingRound(reason) {
+        if (rapidIntervalId !== null) window.clearInterval(rapidIntervalId);
+        rapidIntervalId = null;
+        rapidPhase = "finishing";
+        if (loopId !== null) window.clearTimeout(loopId);
+        loopId = null;
+        monitoring = false;
+        baseline = null;
+        monitorButton.textContent = "監視を開始";
+        rapidPhase = "finished";
+        rapidTimer.textContent = reason === "shots" ? "完了" : "終了";
+        rapidButton.textContent = "もう一度挑戦";
+        rapidDuration.disabled = false;
+        rapidCountdown.disabled = false;
+        shotLimit.disabled = false;
+        trainingMode.disabled = false;
+        const total = hits.reduce((sum, hit) => sum + hit.score, 0);
+        const average = hits.length ? (total / hits.length).toFixed(1) : "—";
+        const ending = reason === "shots" ? "設定数に到達" : "時間終了";
+        const result = trainingMode.value === "accuracy"
+          ? `${currentTrainingName()}結果（${ending}）：${hits.length}発、合計${total}点、平均${average}点`
+          : `早撃ち結果（${ending}）：${hits.length}発、合計${total}点`;
+        trainingResult.textContent = result;
+        setStatus("トレーニング終了", "active");
+        cameraHint.textContent = `終了 — ${hits.length}発・${total}点`;
+        liveMessage.textContent = result;
+      }
+
+      async function startCamera() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus("HTTPS接続が必要です", "error");
+          liveMessage.textContent = "このブラウザでカメラを利用できません。HTTPS接続を確認してください。";
+          return;
+        }
+        cameraButton.disabled = true;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 960 } }
+          });
+          video.srcObject = stream;
+          await video.play();
+          document.getElementById("camera").style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
+          placeholder.hidden = true;
+          cameraButton.textContent = "カメラ起動中";
+          findButton.disabled = false;
+          monitorButton.disabled = false;
+          rapidButton.disabled = false;
+          stopButton.disabled = false;
+          setStatus("カメラ接続中", "active");
+          dimensions();
+          window.addEventListener("resize", dimensions);
+        } catch (error) {
+          cameraButton.disabled = false;
+          setStatus(error.name === "NotAllowedError" ? "カメラ許可が必要です" : "カメラを起動できません", "error");
+          liveMessage.textContent = error.name === "NotAllowedError"
+            ? "ブラウザの設定でカメラへのアクセスを許可してください。"
+            : `カメラを起動できませんでした: ${error.message}`;
+        }
+      }
+
+      function setTarget(found) {
+        target = { x: found.x, y: found.y, r: found.r };
+        tapStage = 0;
+        targetState.textContent = "的を認識しました";
+        cameraHint.textContent = "タップで中心・大きさを調整できます";
+        drawOverlay();
+        if (monitoring) stopMonitoring();
+      }
+
+      function stopMonitoring() {
+        monitoring = false;
+        if (loopId !== null) window.clearTimeout(loopId);
+        loopId = null;
+        baseline = null;
+        if (countdownId !== null) window.clearInterval(countdownId);
+        if (rapidIntervalId !== null) window.clearInterval(rapidIntervalId);
+        countdownId = null;
+        rapidIntervalId = null;
+        if (rapidPhase === "countdown" || rapidPhase === "running") {
+          rapidPhase = "idle";
+          rapidTimer.textContent = formatTime(Number(rapidDuration.value));
+          rapidButton.textContent = startTrainingLabel();
+          rapidDuration.disabled = false;
+          rapidCountdown.disabled = false;
+          shotLimit.disabled = false;
+          trainingMode.disabled = false;
+        }
+        monitorButton.textContent = "監視を開始";
+        setStatus("カメラ接続中", "active");
+      }
+
+      function startMonitoring() {
+        if (!target || video.readyState < 2) return;
+        beginMonitoring();
+      }
+
+      function beginMonitoring() {
+        const image = videoImage(320);
+        if (!image) return false;
+        baseline = image;
+        hits = [];
+        previousCandidates = [];
+        frameCount = 0;
+        renderHits();
+        monitoring = true;
+        monitorButton.textContent = "監視中";
+        setStatus("命中を監視中", "active");
+        cameraHint.textContent = "監視中 — カメラを固定してください";
+        liveMessage.textContent = "監視を開始しました";
+        monitorFrame();
+        return true;
+      }
+
+      function stopCamera() {
+        stopMonitoring();
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        video.srcObject = null;
+        document.getElementById("camera").style.aspectRatio = "4 / 3";
+        placeholder.hidden = false;
+        cameraButton.disabled = false;
+        cameraButton.textContent = "カメラを起動";
+        findButton.disabled = true;
+        monitorButton.disabled = true;
+        stopButton.disabled = true;
+        rapidButton.disabled = true;
+        target = null;
+        baseline = null;
+        targetState.textContent = "的を未検出";
+        cameraHint.textContent = "的全体が画面に入るようにカメラを固定してください";
+        drawOverlay();
+        setStatus("カメラ未接続", "idle");
+      }
+
+      cameraButton.addEventListener("click", startCamera);
+      findButton.addEventListener("click", () => {
+        const image = videoImage(320);
+        const found = image && findCircle(image);
+        if (!found) {
+          targetState.textContent = "自動検出できません — 的をタップ";
+          cameraHint.textContent = "画面をタップして的の中心を指定してください";
+          liveMessage.textContent = "的を検出できませんでした。画面をタップして中心を指定してください。";
+          return;
+        }
+        setTarget(found);
+        liveMessage.textContent = "的を自動検出しました";
+      });
+      monitorButton.addEventListener("click", () => {
+        if (monitoring) stopMonitoring();
+        else if (target) startMonitoring();
+        else {
+          targetState.textContent = "先に的を検出してください";
+          liveMessage.textContent = "監視を開始する前に的を検出してください。";
+        }
+      });
+      rapidButton.addEventListener("click", startRapidRound);
+      trainingMode.addEventListener("change", updateTrainingMode);
+      rapidDuration.addEventListener("change", () => {
+        if (rapidPhase !== "countdown" && rapidPhase !== "running") rapidTimer.textContent = formatTime(Number(rapidDuration.value));
+      });
+      stopButton.addEventListener("click", stopCamera);
+      resetButton.addEventListener("click", () => { hits = []; renderHits(); });
+      undoButton.addEventListener("click", () => { hits.pop(); renderHits(); });
+      sensitivity.addEventListener("input", () => { sensitivityValue.textContent = sensitivity.value; });
+      overlay.addEventListener("click", event => {
+        if (!video.videoWidth) return;
+        const rect = overlay.getBoundingClientRect();
+        const x = (event.clientX - rect.left) / rect.width;
+        const y = (event.clientY - rect.top) / rect.height;
+        if (tapStage === 0 || !target) {
+          target = { x, y, r: .28 };
+          tapStage = 1;
+          targetState.textContent = "中心を設定 — 外周をタップ";
+          cameraHint.textContent = "的の外周をタップして大きさを設定してください";
+          drawOverlay();
+        } else {
+          target.r = Math.max(.08, Math.min(.49, Math.hypot((x - target.x) * overlay.width, (y - target.y) * overlay.height) / Math.min(overlay.width, overlay.height)));
+          tapStage = 0;
+          targetState.textContent = "的を手動設定しました";
+          cameraHint.textContent = "タップで中心・大きさを調整できます";
+          drawOverlay();
+        }
+      });
+      window.addEventListener("orientationchange", () => window.setTimeout(dimensions, 250));
+      updateTrainingMode();
+      renderHits();
+      if ("serviceWorker" in navigator && location.protocol !== "file:") {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker.register("./sw.js").catch(error => {
+            console.error("オフライン機能を登録できませんでした:", error);
+          });
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
