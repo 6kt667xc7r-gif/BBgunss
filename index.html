@@ -37,6 +37,10 @@
     .camera-hint { position: absolute; z-index: 1; bottom: 10px; left: 10px; right: 10px; text-align: center; color: white; font-size: .77rem; text-shadow: 0 1px 5px #000; pointer-events: none; }
     .camera-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: #9baa97; font-size: .9rem; }
     .controls { display: flex; flex-wrap: wrap; gap: 9px; padding: 12px; }
+    .zoom-control { display: grid; grid-template-columns: auto minmax(0, 1fr) minmax(5rem, auto); align-items: center; gap: 10px; padding: 0 12px 8px; font-size: .84rem; }
+    .zoom-control input { width: 100%; accent-color: #a7e278; }
+    .zoom-control output { color: #b9ee94; text-align: right; font-variant-numeric: tabular-nums; }
+    .zoom-help { margin: 0; padding: 0 12px 12px; }
     button { border: 0; border-radius: 11px; min-height: 44px; padding: 0 15px; background: #2a382d; color: #f3f5ef; font: inherit; font-size: .88rem; font-weight: 650; cursor: pointer; touch-action: manipulation; }
     button.primary { flex: 1 1 180px; background: #a7e278; color: #152012; }
     button:disabled { opacity: .48; cursor: not-allowed; }
@@ -95,6 +99,12 @@
         <button id="findButton" disabled>的を自動検出</button>
         <button id="monitorButton" disabled>監視を開始</button>
       </div>
+      <label class="zoom-control" for="cameraZoom">
+        <span>カメラズーム</span>
+        <input id="cameraZoom" type="range" min="1" max="5" step="0.1" value="1" disabled>
+        <output id="zoomValue" for="cameraZoom">1.0x</output>
+      </label>
+      <p class="muted zoom-help">端末のカメラズームに未対応なら画面拡大（画質は向上しません）を使います。ズーム時は的を画面中央に合わせてください。遠くの的は「遠距離検出」をONにすると見つけやすくなります。</p>
     </section>
 
     <div class="score-row">
@@ -141,6 +151,7 @@
     <section class="card section">
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
       <p class="muted">的を認識すると、カメラ起動中は0.1秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
+      <label class="setting" for="farTargetToggle"><span>遠距離検出（小さい的も探す）</span><input id="farTargetToggle" type="checkbox"></label>
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
       <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
@@ -155,7 +166,7 @@
         <button id="stopButton" disabled>カメラを停止</button>
       </div>
     </section>
-    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。的全体が画面に入るようにカメラを向けてください。位置は0.1秒ごとに自動補正しますが、大きな揺れやブレでは検出できないことがあります。</p>
+    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。遠い的はズームを上げ、「遠距離検出」をONにしてから自動検出してください。的全体が画面に入るようにし、位置は0.1秒ごとに自動補正します。大きな揺れやブレでは検出できないことがあります。</p>
     <div id="liveMessage" class="sr-only" aria-live="polite"></div>
     <canvas id="work" class="sr-only"></canvas>
   </main>
@@ -169,6 +180,9 @@
       const status = document.getElementById("status");
       const statusText = document.getElementById("statusText");
       const cameraButton = document.getElementById("cameraButton");
+      const cameraZoom = document.getElementById("cameraZoom");
+      const zoomValue = document.getElementById("zoomValue");
+      const farTargetToggle = document.getElementById("farTargetToggle");
       const findButton = document.getElementById("findButton");
       const monitorButton = document.getElementById("monitorButton");
       const rapidButton = document.getElementById("rapidButton");
@@ -195,6 +209,9 @@
       const liveMessage = document.getElementById("liveMessage");
       const targetTrackingInterval = 100;
       let stream = null;
+      let zoomCapabilities = null;
+      let digitalZoom = 1;
+      let zoomApplyTimeoutId = null;
       let target = null;
       let monitorTarget = null;
       let baseline = null;
@@ -215,6 +232,55 @@
       function setStatus(text, state) {
         statusText.textContent = text;
         status.dataset.state = state;
+      }
+
+      function updateZoomControl() {
+        cameraZoom.disabled = !stream || monitoring || rapidPhase === "countdown" || rapidPhase === "running";
+      }
+
+      async function applyCameraZoom() {
+        const requestedZoom = Number(cameraZoom.value);
+        const track = stream && stream.getVideoTracks()[0];
+        let cameraZoomLevel = 1;
+        if (zoomCapabilities && track && typeof track.applyConstraints === "function") {
+          cameraZoomLevel = Math.min(requestedZoom, zoomCapabilities.max);
+          try {
+            await track.applyConstraints({ advanced: [{ zoom: cameraZoomLevel }] });
+          } catch (error) {
+            zoomCapabilities = null;
+            cameraZoomLevel = 1;
+            liveMessage.textContent = `端末のカメラズームを利用できません。画面ズームに切り替えました: ${error.message}`;
+          }
+        }
+        digitalZoom = requestedZoom / cameraZoomLevel;
+        video.style.transform = `scale(${digitalZoom})`;
+        const mode = zoomCapabilities
+          ? (digitalZoom > 1.01 ? "端末+画面" : "カメラ")
+          : "画面";
+        zoomValue.textContent = `${requestedZoom.toFixed(1)}x · ${mode}`;
+        if (target) {
+          if (trackingTimeoutId !== null) window.clearTimeout(trackingTimeoutId);
+          trackingTimeoutId = null;
+          scheduleTargetTracking(0);
+        }
+      }
+
+      function prepareCameraZoom() {
+        zoomCapabilities = null;
+        const track = stream && stream.getVideoTracks()[0];
+        try {
+          const capabilities = track && typeof track.getCapabilities === "function"
+            ? track.getCapabilities()
+            : null;
+          if (capabilities && capabilities.zoom &&
+              Number.isFinite(capabilities.zoom.max) && capabilities.zoom.max > 1 &&
+              (!Number.isFinite(capabilities.zoom.min) || capabilities.zoom.min <= 1)) {
+            zoomCapabilities = { max: Math.min(5, capabilities.zoom.max) };
+          }
+        } catch (error) {
+          liveMessage.textContent = `カメラのズーム範囲を確認できませんでした。画面ズームを利用します: ${error.message}`;
+        }
+        applyCameraZoom();
       }
 
       function prepareAudioContext() {
@@ -370,14 +436,20 @@
         overlayCtx.restore();
       }
 
-      function videoImage(size = 480) {
+      function videoImage(size = 480, upscale = digitalZoom > 1) {
         if (!video.videoWidth || !video.videoHeight) return null;
-        const scale = Math.min(size / video.videoWidth, size / video.videoHeight, 1);
-        const width = Math.max(1, Math.round(video.videoWidth * scale));
-        const height = Math.max(1, Math.round(video.videoHeight * scale));
+        const sourceWidth = video.videoWidth / digitalZoom;
+        const sourceHeight = video.videoHeight / digitalZoom;
+        const sourceX = (video.videoWidth - sourceWidth) / 2;
+        const sourceY = (video.videoHeight - sourceHeight) / 2;
+        const scale = upscale
+          ? Math.min(size / sourceWidth, size / sourceHeight)
+          : Math.min(size / sourceWidth, size / sourceHeight, 1);
+        const width = Math.max(1, Math.round(sourceWidth * scale));
+        const height = Math.max(1, Math.round(sourceHeight * scale));
         work.width = width;
         work.height = height;
-        workCtx.drawImage(video, 0, 0, width, height);
+        workCtx.drawImage(video, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, width, height);
         return { width, height, data: workCtx.getImageData(0, 0, width, height).data };
       }
 
@@ -393,7 +465,7 @@
         }
 
         const boundaries = [1, .8, .56, .39, .2, .1];
-        const minRadius = Math.floor(minSide * .15);
+        const minRadius = Math.floor(minSide * (farTargetToggle.checked ? .05 : .15));
         const maxRadius = Math.floor(minSide * .47);
         const coarseRadiusStep = Math.max(2, Math.round(minSide * .008));
         const scoreCircle = (cx, cy, radius, angleCount) => {
@@ -841,6 +913,7 @@
         const countdownSeconds = Number(rapidCountdown.value);
         const countdownEnds = Date.now() + countdownSeconds * 1000;
         rapidPhase = "countdown";
+        updateZoomControl();
         rapidDuration.disabled = true;
         rapidCountdown.disabled = true;
         shotLimit.disabled = true;
@@ -901,6 +974,7 @@
         rapidCountdown.disabled = false;
         shotLimit.disabled = false;
         trainingMode.disabled = false;
+        updateZoomControl();
         const total = hits.reduce((sum, hit) => sum + hit.score, 0);
         const average = hits.length ? (total / hits.length).toFixed(1) : "—";
         const ending = reason === "shots" ? "設定数に到達" : "時間終了";
@@ -930,6 +1004,7 @@
           });
           video.srcObject = stream;
           await video.play();
+          prepareCameraZoom();
           document.getElementById("camera").style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
           placeholder.hidden = true;
           cameraButton.textContent = "カメラ起動中";
@@ -937,6 +1012,7 @@
           monitorButton.disabled = false;
           rapidButton.disabled = false;
           stopButton.disabled = false;
+          updateZoomControl();
           setStatus("カメラ接続中", "active");
           dimensions();
           window.addEventListener("resize", dimensions);
@@ -981,6 +1057,7 @@
           shotLimit.disabled = false;
           trainingMode.disabled = false;
         }
+        updateZoomControl();
         monitorButton.textContent = "監視を開始";
         setStatus("カメラ接続中", "active");
         scheduleTargetTracking();
@@ -999,6 +1076,7 @@
         previousCandidates = [];
         renderHits();
         monitoring = true;
+        updateZoomControl();
         monitorButton.textContent = "監視中";
         setStatus("命中を監視中", "active");
         cameraHint.textContent = "命中監視中 — 的の位置を0.1秒ごとに自動補正します";
@@ -1017,6 +1095,12 @@
         if (stream) stream.getTracks().forEach(track => track.stop());
         stream = null;
         video.srcObject = null;
+        video.style.transform = "";
+        digitalZoom = 1;
+        zoomCapabilities = null;
+        updateZoomControl();
+        if (zoomApplyTimeoutId !== null) window.clearTimeout(zoomApplyTimeoutId);
+        zoomApplyTimeoutId = null;
         document.getElementById("camera").style.aspectRatio = "4 / 3";
         placeholder.hidden = false;
         cameraButton.disabled = false;
@@ -1041,12 +1125,16 @@
         targetState.textContent = "同心円を解析中…";
         window.setTimeout(() => {
           try {
-            const image = videoImage(480);
+            const image = videoImage(farTargetToggle.checked ? 640 : 480, farTargetToggle.checked);
             const found = image && findCircle(image);
             if (!found) {
               targetState.textContent = "検出できません — 的をタップして指定";
-              cameraHint.textContent = "的全体が入り、反射や影の少ない状態で再試行してください";
-              liveMessage.textContent = "同心円の的を確認できませんでした。的全体を正面から映すか、画面タップで指定してください。";
+              cameraHint.textContent = farTargetToggle.checked
+                ? "ズームを上げ、的全体が入るようにして再試行してください"
+                : "的全体が入り、反射や影の少ない状態で再試行してください";
+              liveMessage.textContent = farTargetToggle.checked
+                ? "小さい的を確認できませんでした。ズームを上げて的全体を映すか、画面タップで指定してください。"
+                : "同心円の的を確認できませんでした。的全体を正面から映すか、画面タップで指定してください。";
               return;
             }
             setTarget(found);
@@ -1078,6 +1166,14 @@
       resetButton.addEventListener("click", () => { hits = []; renderHits(); });
       undoButton.addEventListener("click", () => { hits.pop(); renderHits(); });
       sensitivity.addEventListener("input", () => { sensitivityValue.textContent = sensitivity.value; });
+      cameraZoom.addEventListener("input", () => {
+        zoomValue.textContent = `${Number(cameraZoom.value).toFixed(1)}x`;
+        if (zoomApplyTimeoutId !== null) window.clearTimeout(zoomApplyTimeoutId);
+        zoomApplyTimeoutId = window.setTimeout(() => {
+          zoomApplyTimeoutId = null;
+          applyCameraZoom();
+        }, 120);
+      });
       overlay.addEventListener("click", event => {
         if (!video.videoWidth) return;
         const rect = overlay.getBoundingClientRect();
