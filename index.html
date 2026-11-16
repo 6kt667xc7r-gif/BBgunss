@@ -150,7 +150,7 @@
 
     <section class="card section">
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
-      <p class="muted">的を認識すると、カメラ起動中は0.1秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
+      <p class="muted">斜め撮影では的の楕円形状を認識して補正します。認識後は位置・大きさを0.1秒ごとに自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="farTargetToggle"><span>遠距離検出（小さい的も探す）</span><input id="farTargetToggle" type="checkbox"></label>
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
@@ -208,6 +208,7 @@
       const countElement = document.getElementById("count");
       const liveMessage = document.getElementById("liveMessage");
       const targetTrackingInterval = 100;
+      const ellipseSampleVectors = new Map();
       let stream = null;
       let zoomCapabilities = null;
       let digitalZoom = 1;
@@ -364,7 +365,12 @@
         const { width, height } = overlay;
         const x = target.x * width;
         const y = target.y * height;
-        const radius = target.r * Math.min(width, height);
+        const minSide = Math.min(width, height);
+        const radiusX = (target.rx || target.r) * minSide;
+        const radiusY = (target.ry || target.r) * minSide;
+        const angle = target.angle || 0;
+        const extentX = Math.hypot(radiusX * Math.cos(angle), radiusY * Math.sin(angle));
+        const extentY = Math.hypot(radiusX * Math.sin(angle), radiusY * Math.cos(angle));
         overlayCtx.save();
         const rings = [
           { radius: 1, color: "rgba(255,255,255,.10)" },
@@ -377,7 +383,7 @@
         overlayCtx.lineWidth = Math.max(1.5, width / 320);
         for (const ring of rings) {
           overlayCtx.beginPath();
-          overlayCtx.arc(x, y, radius * ring.radius, 0, Math.PI * 2);
+          overlayCtx.ellipse(x, y, radiusX * ring.radius, radiusY * ring.radius, angle, 0, Math.PI * 2);
           overlayCtx.fillStyle = ring.color;
           overlayCtx.fill();
           overlayCtx.strokeStyle = "rgba(15,20,18,.9)";
@@ -385,15 +391,16 @@
         }
         if (target.confirmed) {
           const padding = Math.max(4, width / 160);
-          const frameX = x - radius - padding;
-          const frameY = y - radius - padding;
-          const frameSize = radius * 2 + padding * 2;
+          const frameX = x - extentX - padding;
+          const frameY = y - extentY - padding;
+          const frameWidth = extentX * 2 + padding * 2;
+          const frameHeight = extentY * 2 + padding * 2;
           overlayCtx.save();
           overlayCtx.strokeStyle = "#35ff78";
           overlayCtx.lineWidth = Math.max(3, width / 100);
           overlayCtx.shadowColor = "#35ff78";
           overlayCtx.shadowBlur = Math.max(8, width / 35);
-          overlayCtx.strokeRect(frameX, frameY, frameSize, frameSize);
+          overlayCtx.strokeRect(frameX, frameY, frameWidth, frameHeight);
           overlayCtx.shadowBlur = 0;
           overlayCtx.font = `700 ${Math.max(12, Math.min(18, width / 28))}px -apple-system, sans-serif`;
           const label = "的を認識";
@@ -409,7 +416,8 @@
           overlayCtx.fillText(label, labelX + 6, labelY + labelHeight / 2);
           overlayCtx.restore();
         }
-        const labelRadius = radius;
+        const majorDirectionX = Math.cos(angle);
+        const majorDirectionY = Math.sin(angle);
         const labels = [
           { score: "5", distance: .9 },
           { score: "6", distance: .68 },
@@ -425,9 +433,10 @@
         overlayCtx.fillStyle = "#111";
         for (const label of labels) {
           for (const direction of [-1, 1]) {
-            const labelX = x + direction * labelRadius * label.distance;
-            overlayCtx.strokeText(label.score, labelX, y);
-            overlayCtx.fillText(label.score, labelX, y);
+            const labelX = x + direction * radiusX * label.distance * majorDirectionX;
+            const labelY = y + direction * radiusX * label.distance * majorDirectionY;
+            overlayCtx.strokeText(label.score, labelX, labelY);
+            overlayCtx.fillText(label.score, labelX, labelY);
           }
         }
         overlayCtx.fillStyle = "#111";
@@ -466,6 +475,7 @@
 
         const boundaries = [1, .8, .56, .39, .2, .1];
         const minRadius = Math.floor(minSide * (farTargetToggle.checked ? .05 : .15));
+        const minEllipseRadius = minRadius * .5;
         const maxRadius = Math.floor(minSide * .47);
         const coarseRadiusStep = Math.max(2, Math.round(minSide * .008));
         const scoreCircle = (cx, cy, radius, angleCount) => {
@@ -502,6 +512,72 @@
             x: cx,
             y: cy,
             radius,
+            rx: radius,
+            ry: radius,
+            angle: 0,
+            score: totalScore / boundaries.length,
+            supportedBoundaries,
+            outerContrast
+          };
+        };
+        const scoreEllipse = (cx, cy, radiusX, ratio, angle, angleCount) => {
+          const radiusY = radiusX * ratio;
+          const cosine = Math.cos(angle), sine = Math.sin(angle);
+          let samples = ellipseSampleVectors.get(angleCount);
+          if (!samples) {
+            samples = Array.from({ length: angleCount }, (_, index) => {
+              const sampleAngle = index * Math.PI * 2 / angleCount;
+              return { cosine: Math.cos(sampleAngle), sine: Math.sin(sampleAngle) };
+            });
+            ellipseSampleVectors.set(angleCount, samples);
+          }
+          const extentX = Math.hypot(radiusX * cosine, radiusY * sine);
+          const extentY = Math.hypot(radiusX * sine, radiusY * cosine);
+          if (cx - extentX < 4 || cy - extentY < 4 || cx + extentX >= width - 4 || cy + extentY >= height - 4) return null;
+          let totalScore = 0;
+          let supportedBoundaries = 0;
+          let outerContrast = 0;
+          for (let ring = 0; ring < boundaries.length; ring++) {
+            const ringRadiusX = radiusX * boundaries[ring];
+            const ringRadiusY = radiusY * boundaries[ring];
+            if (ringRadiusY < 5) continue;
+            let contrastSum = 0;
+            let strongEdges = 0;
+            for (const sample of samples) {
+              const localX = ringRadiusX * sample.cosine;
+              const localY = ringRadiusY * sample.sine;
+              const pointX = cx + cosine * localX - sine * localY;
+              const pointY = cy + sine * localX + cosine * localY;
+              const normalX = sample.cosine / radiusX;
+              const normalY = sample.sine / radiusY;
+              const normalLength = Math.hypot(normalX, normalY);
+              const rotatedNormalX = (cosine * normalX - sine * normalY) / normalLength;
+              const rotatedNormalY = (sine * normalX + cosine * normalY) / normalLength;
+              const innerX = Math.round(pointX - rotatedNormalX * 2);
+              const innerY = Math.round(pointY - rotatedNormalY * 2);
+              const outerX = Math.round(pointX + rotatedNormalX * 2);
+              const outerY = Math.round(pointY + rotatedNormalY * 2);
+              const contrast = Math.abs(
+                gray[innerY * width + innerX] - gray[outerY * width + outerX]
+              );
+              contrastSum += contrast;
+              if (contrast >= 14) strongEdges++;
+            }
+            const meanContrast = contrastSum / angleCount;
+            const coverage = strongEdges / angleCount;
+            const boundaryScore = Math.min(1, meanContrast / 48) * (.45 + .55 * coverage);
+            totalScore += boundaryScore;
+            if (meanContrast >= 12 && coverage >= .28) supportedBoundaries++;
+            if (ring === 0) outerContrast = meanContrast;
+          }
+          return {
+            x: cx,
+            y: cy,
+            radius: radiusX,
+            rx: radiusX,
+            ry: radiusY,
+            ratio,
+            angle,
             score: totalScore / boundaries.length,
             supportedBoundaries,
             outerContrast
@@ -524,19 +600,81 @@
           }
           return best;
         };
+        const searchEllipseNear = (center, reach, centerStep, radiusFrom, radiusTo, radiusStep, ratios, angles, angleCount, currentBest) => {
+          let best = currentBest;
+          const minX = Math.max(4, Math.round(center.x - reach));
+          const maxX = Math.min(width - 5, Math.round(center.x + reach));
+          const minY = Math.max(4, Math.round(center.y - reach));
+          const maxY = Math.min(height - 5, Math.round(center.y + reach));
+          for (const ratio of ratios) {
+            const firstRadius = Math.max(radiusFrom, Math.ceil(minEllipseRadius / ratio));
+            for (const angle of angles) {
+              for (let cy = minY; cy <= maxY; cy += centerStep) {
+                for (let cx = minX; cx <= maxX; cx += centerStep) {
+                  for (let radius = firstRadius; radius <= radiusTo; radius += radiusStep) {
+                    const candidate = scoreEllipse(cx, cy, radius, ratio, angle, angleCount);
+                    if (isBetter(candidate, best)) best = candidate;
+                  }
+                }
+              }
+            }
+          }
+          return best;
+        };
 
         const isValid = candidate => candidate &&
           candidate.score >= .32 &&
           candidate.supportedBoundaries >= 4 &&
           candidate.outerContrast >= 12;
-        const toFound = candidate => ({
-          x: candidate.x / width,
-          y: candidate.y / height,
-          r: candidate.radius / minSide,
-          confidence: Math.round(candidate.score * 100)
-        });
+        const toFound = candidate => {
+          const radiusX = candidate.rx || candidate.radius;
+          const radiusY = candidate.ry || candidate.radius;
+          return {
+            x: candidate.x / width,
+            y: candidate.y / height,
+            r: Math.sqrt(radiusX * radiusY) / minSide,
+            rx: radiusX / minSide,
+            ry: radiusY / minSide,
+            ratio: radiusY / radiusX,
+            angle: candidate.angle || 0,
+            confidence: Math.round(candidate.score * 100)
+          };
+        };
 
         if (previousTarget) {
+          const previousRadiusX = (previousTarget.rx || previousTarget.r) * minSide;
+          const previousRadiusY = (previousTarget.ry || previousTarget.r) * minSide;
+          const previousRatio = previousRadiusY / previousRadiusX;
+          if (previousRatio < .96) {
+            const radiusRange = Math.max(4, Math.round(minSide * .04));
+            const ellipseBest = searchEllipseNear(
+              { x: previousTarget.x * width, y: previousTarget.y * height },
+              Math.max(5, Math.round(minSide * .08)),
+              Math.max(2, Math.round(minSide * .015)),
+              Math.max(minEllipseRadius / previousRatio, Math.round(previousRadiusX - radiusRange)),
+              Math.min(maxRadius, Math.round(previousRadiusX + radiusRange)),
+              coarseRadiusStep,
+              [previousRatio],
+              [previousTarget.angle || 0],
+              24,
+              null
+            );
+            if (!isValid(ellipseBest)) return null;
+            const refineRange = Math.max(2, Math.round(minSide * .01));
+            const refinedEllipse = searchEllipseNear(
+              ellipseBest,
+              Math.max(2, Math.round(minSide * .006)),
+              1,
+              Math.max(minEllipseRadius / previousRatio, ellipseBest.radius - refineRange),
+              Math.min(maxRadius, ellipseBest.radius + refineRange),
+              1,
+              [previousRatio],
+              [previousTarget.angle || 0],
+              40,
+              ellipseBest
+            );
+            return isValid(refinedEllipse) ? toFound(refinedEllipse) : null;
+          }
           const previousRadius = previousTarget.r * minSide;
           const radiusRange = Math.max(4, Math.round(minSide * .04));
           const centerRange = Math.max(5, Math.round(minSide * .08));
@@ -601,8 +739,14 @@
           const componentWidth = maxX - minX + 1;
           const componentHeight = maxY - minY + 1;
           const aspect = componentWidth / componentHeight;
-          if (tail < 5 || tail > maxRedArea || aspect < .5 || aspect > 2) continue;
-          redComponents.push({ x: sumX / tail, y: sumY / tail, area: tail });
+          if (tail < 5 || tail > maxRedArea || aspect < .15 || aspect > 6) continue;
+          redComponents.push({
+            x: sumX / tail,
+            y: sumY / tail,
+            area: tail,
+            aspect,
+            density: tail / (componentWidth * componentHeight)
+          });
         }
         redComponents.sort((a, b) => b.area - a.area);
         let best = null;
@@ -618,6 +762,54 @@
             null
           );
           if (isBetter(candidate, best)) best = candidate;
+        }
+
+        const likelyTilted = redComponents.some(component =>
+          component.aspect < .82 || component.aspect > 1.22 || component.density < .68
+        );
+        if (redComponents.length && (likelyTilted || !isValid(best) || best.score < .65)) {
+          const ellipseRatios = [.92, .82, .72, .62, .52, .42, .32, .24];
+          const ellipseAngles = Array.from({ length: 16 }, (_, index) => index * Math.PI / 16);
+          let ellipseBest = null;
+          for (const component of redComponents.slice(0, 3)) {
+            const candidate = searchEllipseNear(
+              component,
+              Math.max(4, Math.round(minSide * .025)),
+              Math.max(4, Math.round(minSide * .012)),
+              minRadius,
+              maxRadius,
+              coarseRadiusStep,
+              ellipseRatios,
+              ellipseAngles,
+              24,
+              null
+            );
+            if (isBetter(candidate, ellipseBest)) ellipseBest = candidate;
+          }
+          if (isValid(ellipseBest) && (
+            !isValid(best) ||
+            ellipseBest.score > best.score ||
+            (likelyTilted && ellipseBest.ratio < .9 && ellipseBest.score >= best.score * .9)
+          )) {
+            const ratios = [Math.max(.2, ellipseBest.ratio - .04), ellipseBest.ratio, Math.min(.99, ellipseBest.ratio + .04)];
+            const angles = [ellipseBest.angle - Math.PI / 32, ellipseBest.angle, ellipseBest.angle + Math.PI / 32];
+            const refineRange = Math.max(2, Math.round(minSide * .01));
+            const refinedEllipse = searchEllipseNear(
+              ellipseBest,
+              Math.max(2, Math.round(minSide * .006)),
+              1,
+              Math.max(minEllipseRadius / ellipseBest.ratio, ellipseBest.radius - refineRange),
+              Math.min(maxRadius, ellipseBest.radius + refineRange),
+              1,
+              ratios,
+              angles,
+              40,
+              ellipseBest
+            );
+            if (isValid(refinedEllipse) && (!isValid(best) || refinedEllipse.score > best.score)) {
+              return toFound(refinedEllipse);
+            }
+          }
         }
 
         if (!best || best.score < .32 || best.supportedBoundaries < 4 || best.outerContrast < 12) {
@@ -660,6 +852,16 @@
         return data[i] * .299 + data[i + 1] * .587 + data[i + 2] * .114;
       }
 
+      function normalizedTargetDistance(dx, dy, shape, minSide) {
+        const angle = shape.angle || 0;
+        const cosine = Math.cos(angle), sine = Math.sin(angle);
+        const localX = dx * cosine + dy * sine;
+        const localY = -dx * sine + dy * cosine;
+        const radiusX = (shape.rx || shape.r) * minSide;
+        const radiusY = (shape.ry || shape.r) * minSide;
+        return Math.hypot(localX / radiusX, localY / radiusY);
+      }
+
       function detectCandidates(image) {
         const { width, height, data } = image;
         const minSide = Math.min(width, height);
@@ -668,8 +870,14 @@
         const centerY = referenceTarget.y * height;
         const liveCenterX = target.x * width;
         const liveCenterY = target.y * height;
-        const scale = target.r / referenceTarget.r;
-        const radius = referenceTarget.r * minSide;
+        const referenceAngle = referenceTarget.angle || 0;
+        const targetAngle = target.angle || 0;
+        const referenceRadiusX = (referenceTarget.rx || referenceTarget.r) * minSide;
+        const referenceRadiusY = (referenceTarget.ry || referenceTarget.r) * minSide;
+        const targetRadiusX = (target.rx || target.r) * minSide;
+        const targetRadiusY = (target.ry || target.r) * minSide;
+        const referenceCosine = Math.cos(referenceAngle), referenceSine = Math.sin(referenceAngle);
+        const targetCosine = Math.cos(targetAngle), targetSine = Math.sin(targetAngle);
         const step = Math.max(1, Math.round(minSide / 260));
         const threshold = Number(sensitivity.value);
         const cols = Math.ceil(width / step);
@@ -680,9 +888,16 @@
           for (let gx = 0; gx < cols; gx++) {
             const x = Math.min(width - 1, gx * step);
             const dx = x - centerX, dy = y - centerY;
-            if (dx * dx + dy * dy > radius * radius * .96) continue;
-            const liveX = Math.round(liveCenterX + dx * scale);
-            const liveY = Math.round(liveCenterY + dy * scale);
+            const referenceLocalX = dx * referenceCosine + dy * referenceSine;
+            const referenceLocalY = -dx * referenceSine + dy * referenceCosine;
+            const normalizedRadius = Math.hypot(referenceLocalX / referenceRadiusX, referenceLocalY / referenceRadiusY);
+            if (normalizedRadius > .98) continue;
+            const targetLocalX = referenceLocalX * targetRadiusX / referenceRadiusX;
+            const targetLocalY = referenceLocalY * targetRadiusY / referenceRadiusY;
+            const targetDx = targetLocalX * targetCosine - targetLocalY * targetSine;
+            const targetDy = targetLocalX * targetSine + targetLocalY * targetCosine;
+            const liveX = Math.round(liveCenterX + targetDx);
+            const liveY = Math.round(liveCenterY + targetDy);
             if (liveX < 0 || liveX >= width || liveY < 0 || liveY >= height) continue;
             const index = liveY * width + liveX;
             const oldGray = sampleGray(baseline.data, width, height, x, y);
@@ -716,7 +931,7 @@
           const maxArea = minSide * minSide * .008;
           if (areaPixels < minArea || areaPixels > maxArea) continue;
           const x = sx / area / width, y = sy / area / height;
-          if (Math.hypot((x * width - centerX), (y * height - centerY)) > radius * .98) continue;
+          if (normalizedTargetDistance(x * width - centerX, y * height - centerY, referenceTarget, minSide) > .98) continue;
           candidates.push({ x, y });
         }
         return candidates;
@@ -725,8 +940,9 @@
       function scoreHit(point) {
         const referenceTarget = monitorTarget || target;
         const minSide = Math.min(video.videoWidth, video.videoHeight);
-        const distance = Math.hypot((point.x - referenceTarget.x) * video.videoWidth, (point.y - referenceTarget.y) * video.videoHeight);
-        const normalized = distance / (referenceTarget.r * minSide);
+        const dx = (point.x - referenceTarget.x) * video.videoWidth;
+        const dy = (point.y - referenceTarget.y) * video.videoHeight;
+        const normalized = normalizedTargetDistance(dx, dy, referenceTarget, minSide);
         if (normalized > 1) return 0;
         if (normalized <= .1) return 10;
         if (normalized <= .2) return 9;
@@ -797,7 +1013,7 @@
         const image = videoImage(320);
         if (!image) return false;
         baseline = image;
-        monitorTarget = { x: target.x, y: target.y, r: target.r };
+        monitorTarget = { ...target };
         previousCandidates = [];
         return true;
       }
@@ -811,7 +1027,7 @@
           found = findCircle(image);
         }
         if (found) {
-          target = { ...target, x: found.x, y: found.y, r: found.r, confirmed: true };
+          target = { ...target, ...found, confirmed: true };
           targetTrackingMisses = 0;
           drawOverlay();
           if (monitoring && previousMisses > 0 && !rebaseMonitorBaseline()) {
@@ -823,8 +1039,16 @@
               (target.x - monitorTarget.x) * baseline.width,
               (target.y - monitorTarget.y) * baseline.height
             );
-            const radiusShift = Math.abs(target.r - monitorTarget.r) * Math.min(baseline.width, baseline.height);
-            if ((centerShift > 3 || radiusShift > 2) && !rebaseMonitorBaseline()) {
+            const minSide = Math.min(baseline.width, baseline.height);
+            const radiusShift = Math.max(
+              Math.abs((target.rx || target.r) - (monitorTarget.rx || monitorTarget.r)),
+              Math.abs((target.ry || target.r) - (monitorTarget.ry || monitorTarget.r))
+            ) * minSide;
+            const angleShift = Math.abs(Math.atan2(
+              Math.sin(2 * ((target.angle || 0) - (monitorTarget.angle || 0))),
+              Math.cos(2 * ((target.angle || 0) - (monitorTarget.angle || 0)))
+            )) / 2;
+            if ((centerShift > 3 || radiusShift > 2 || angleShift * minSide > 2) && !rebaseMonitorBaseline()) {
               targetTrackingMisses = 1;
               liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
             }
@@ -1026,7 +1250,7 @@
       }
 
       function setTarget(found) {
-        target = { x: found.x, y: found.y, r: found.r, confirmed: true };
+        target = { ...found, confirmed: true };
         targetTrackingMisses = 0;
         lastFullTargetScanAt = Date.now();
         tapStage = 0;
@@ -1081,7 +1305,7 @@
         setStatus("命中を監視中", "active");
         cameraHint.textContent = "命中監視中 — 的の位置を0.1秒ごとに自動補正します";
         liveMessage.textContent = "監視を開始しました";
-        monitorTarget = { x: target.x, y: target.y, r: target.r };
+        monitorTarget = { ...target };
         targetTrackingMisses = 0;
         lastFullTargetScanAt = Date.now();
         monitorFrame();
@@ -1138,7 +1362,10 @@
               return;
             }
             setTarget(found);
-            targetState.textContent = `的を検出しました（信頼度 ${found.confidence}%）`;
+            const recognitionDetails = found.ratio < .92
+              ? `斜め補正・信頼度 ${found.confidence}%`
+              : `信頼度 ${found.confidence}%`;
+            targetState.textContent = `的を検出しました（${recognitionDetails}）`;
             liveMessage.textContent = `的を検出しました。信頼度 ${found.confidence}%です`;
           } catch (error) {
             targetState.textContent = "検出エラー — もう一度お試しください";
@@ -1180,7 +1407,7 @@
         const x = (event.clientX - rect.left) / rect.width;
         const y = (event.clientY - rect.top) / rect.height;
         if (tapStage === 0 || !target) {
-          target = { x, y, r: .28, confirmed: false };
+          target = { x, y, r: .28, rx: .28, ry: .28, ratio: 1, angle: 0, confirmed: false };
           targetTrackingMisses = 0;
           tapStage = 1;
           targetState.textContent = "中心を設定 — 外周をタップ";
@@ -1188,6 +1415,10 @@
           drawOverlay();
         } else {
           target.r = Math.max(.08, Math.min(.49, Math.hypot((x - target.x) * overlay.width, (y - target.y) * overlay.height) / Math.min(overlay.width, overlay.height)));
+          target.rx = target.r;
+          target.ry = target.r;
+          target.ratio = 1;
+          target.angle = 0;
           target.confirmed = true;
           tapStage = 0;
           targetState.textContent = "的を手動設定・自動追跡中";
