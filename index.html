@@ -946,18 +946,18 @@
           }
           const areaPixels = area * step * step;
           const minArea = Math.max(5, minSide * minSide * .000035);
-          const maxArea = Math.min(minSide * minSide * .004, Math.max(36, targetMinorRadius * targetMinorRadius * .035));
+          const maxArea = Math.min(minSide * minSide * .006, Math.max(48, targetMinorRadius * targetMinorRadius * .05));
           const boundsWidth = (maxGX - minGX + 1) * step;
           const boundsHeight = (maxGY - minGY + 1) * step;
           const aspect = boundsWidth / boundsHeight;
           const compactness = area / ((maxGX - minGX + 1) * (maxGY - minGY + 1));
-          const maxDiameter = Math.max(6, targetMinorRadius * .22);
+          const maxDiameter = Math.max(8, targetMinorRadius * .28);
           const meanCurrentGray = sumCurrentGray / area;
           const meanChange = (sumPreviousGray - sumCurrentGray) / area;
           if (areaPixels < minArea || areaPixels > maxArea ||
               boundsWidth > maxDiameter || boundsHeight > maxDiameter ||
-              aspect < .35 || aspect > 2.8 || compactness < .22 ||
-              meanCurrentGray > 140 || meanChange < 65) continue;
+              aspect < .2 || aspect > 5 || compactness < .12 ||
+              meanCurrentGray > 180 || meanChange < Math.max(threshold + 10, 40)) continue;
           const x = sx / area / width, y = sy / area / height;
           if (normalizedTargetDistance(x * width - centerX, y * height - centerY, referenceTarget, minSide) > .98) continue;
           candidates.push({ x, y, width: boundsWidth, height: boundsHeight, area: areaPixels });
@@ -1012,9 +1012,7 @@
             const candidates = detectCandidates(image);
             for (const candidate of candidates) {
               const matchedPrevious = previousCandidates.some(old =>
-                Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 8 &&
-                Math.abs(old.width - candidate.width) <= Math.max(3, old.width * .4) &&
-                Math.abs(old.height - candidate.height) <= Math.max(3, old.height * .4)
+                Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12
               );
               if (!matchedPrevious) continue;
               const nearRecorded = hits.some(hit => Math.hypot((hit.x - candidate.x) * image.width, (hit.y - candidate.y) * image.height) < 14);
