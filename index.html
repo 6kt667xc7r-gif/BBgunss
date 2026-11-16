@@ -247,6 +247,32 @@
           overlayCtx.strokeStyle = "rgba(15,20,18,.9)";
           overlayCtx.stroke();
         }
+        if (target.confirmed) {
+          const padding = Math.max(4, width / 160);
+          const frameX = x - radius - padding;
+          const frameY = y - radius - padding;
+          const frameSize = radius * 2 + padding * 2;
+          overlayCtx.save();
+          overlayCtx.strokeStyle = "#35ff78";
+          overlayCtx.lineWidth = Math.max(3, width / 100);
+          overlayCtx.shadowColor = "#35ff78";
+          overlayCtx.shadowBlur = Math.max(8, width / 35);
+          overlayCtx.strokeRect(frameX, frameY, frameSize, frameSize);
+          overlayCtx.shadowBlur = 0;
+          overlayCtx.font = `700 ${Math.max(12, Math.min(18, width / 28))}px -apple-system, sans-serif`;
+          const label = "的を認識";
+          const labelWidth = overlayCtx.measureText(label).width + 12;
+          const labelHeight = Math.max(22, width / 18);
+          const labelX = Math.max(0, Math.min(width - labelWidth, frameX));
+          const labelY = Math.max(0, frameY - labelHeight - 4);
+          overlayCtx.fillStyle = "#35ff78";
+          overlayCtx.fillRect(labelX, labelY, labelWidth, labelHeight);
+          overlayCtx.fillStyle = "#102017";
+          overlayCtx.textAlign = "left";
+          overlayCtx.textBaseline = "middle";
+          overlayCtx.fillText(label, labelX + 6, labelY + labelHeight / 2);
+          overlayCtx.restore();
+        }
         const labelRadius = radius;
         const labels = [
           { score: "5", distance: .9 },
@@ -274,7 +300,7 @@
         overlayCtx.restore();
       }
 
-      function videoImage(size = 320) {
+      function videoImage(size = 480) {
         if (!video.videoWidth || !video.videoHeight) return null;
         const scale = Math.min(size / video.videoWidth, size / video.videoHeight, 1);
         const width = Math.max(1, Math.round(video.videoWidth * scale));
@@ -288,40 +314,167 @@
       function findCircle(image) {
         const { width, height, data } = image;
         const minSide = Math.min(width, height);
-        const step = Math.max(2, Math.round(minSide / 100));
-        const maxRadius = Math.floor(minSide * 0.44);
-        const minRadius = Math.floor(minSide * 0.15);
-        const radiusScores = new Map();
-        const gray = (x, y) => {
-          const i = (Math.max(0, Math.min(height - 1, y)) * width + Math.max(0, Math.min(width - 1, x))) * 4;
-          return (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114);
+        const gray = new Uint8Array(width * height);
+        const red = new Uint8Array(width * height);
+        for (let i = 0, pixel = 0; i < data.length; i += 4, pixel++) {
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+          gray[pixel] = r * .299 + g * .587 + b * .114;
+          red[pixel] = r > 75 && r > g * 1.35 && r > b * 1.2 && g < 185 ? 1 : 0;
+        }
+
+        const boundaries = [1, .8, .56, .39, .2, .1];
+        const minRadius = Math.floor(minSide * .15);
+        const maxRadius = Math.floor(minSide * .47);
+        const coarseRadiusStep = Math.max(2, Math.round(minSide * .008));
+        const scoreCircle = (cx, cy, radius, angleCount) => {
+          if (cx - radius < 4 || cy - radius < 4 || cx + radius >= width - 4 || cy + radius >= height - 4) return null;
+          let totalScore = 0;
+          let supportedBoundaries = 0;
+          let outerContrast = 0;
+          for (let ring = 0; ring < boundaries.length; ring++) {
+            const ringRadius = radius * boundaries[ring];
+            if (ringRadius < 5) continue;
+            let contrastSum = 0;
+            let strongEdges = 0;
+            for (let sample = 0; sample < angleCount; sample++) {
+              const angle = sample * Math.PI * 2 / angleCount;
+              const dx = Math.cos(angle), dy = Math.sin(angle);
+              const innerX = Math.round(cx + dx * (ringRadius - 2));
+              const innerY = Math.round(cy + dy * (ringRadius - 2));
+              const outerX = Math.round(cx + dx * (ringRadius + 2));
+              const outerY = Math.round(cy + dy * (ringRadius + 2));
+              const contrast = Math.abs(
+                gray[innerY * width + innerX] - gray[outerY * width + outerX]
+              );
+              contrastSum += contrast;
+              if (contrast >= 14) strongEdges++;
+            }
+            const meanContrast = contrastSum / angleCount;
+            const coverage = strongEdges / angleCount;
+            const boundaryScore = Math.min(1, meanContrast / 48) * (.45 + .55 * coverage);
+            totalScore += boundaryScore;
+            if (meanContrast >= 12 && coverage >= .28) supportedBoundaries++;
+            if (ring === 0) outerContrast = meanContrast;
+          }
+          return {
+            x: cx,
+            y: cy,
+            radius,
+            score: totalScore / boundaries.length,
+            supportedBoundaries,
+            outerContrast
+          };
         };
-        for (let cy = Math.floor(minSide * .1); cy < height - minSide * .1; cy += step) {
-          for (let cx = Math.floor(minSide * .1); cx < width - minSide * .1; cx += step) {
-            for (let r = minRadius; r <= maxRadius; r += step) {
-              if (cx - r < 2 || cy - r < 2 || cx + r >= width - 2 || cy + r >= height - 2) continue;
-              let contrast = 0;
-              let samples = 0;
-              for (let n = 0; n < 24; n++) {
-                const angle = n * Math.PI / 12;
-                const dx = Math.cos(angle), dy = Math.sin(angle);
-                contrast += Math.abs(gray(cx + dx * (r - 2), cy + dy * (r - 2)) - gray(cx + dx * (r + 2), cy + dy * (r + 2)));
-                samples++;
-              }
-              const score = contrast / samples;
-              const radiusCandidate = radiusScores.get(r);
-              if (!radiusCandidate || score > radiusCandidate.score) {
-                radiusScores.set(r, { x: cx / width, y: cy / height, r: r / minSide, score });
+        const isBetter = (candidate, best) => candidate && (!best || candidate.score > best.score);
+        const searchNear = (center, reach, centerStep, radiusFrom, radiusTo, radiusStep, angleCount, currentBest) => {
+          let best = currentBest;
+          const minX = Math.max(4, Math.round(center.x - reach));
+          const maxX = Math.min(width - 5, Math.round(center.x + reach));
+          const minY = Math.max(4, Math.round(center.y - reach));
+          const maxY = Math.min(height - 5, Math.round(center.y + reach));
+          for (let cy = minY; cy <= maxY; cy += centerStep) {
+            for (let cx = minX; cx <= maxX; cx += centerStep) {
+              for (let radius = radiusFrom; radius <= radiusTo; radius += radiusStep) {
+                const candidate = scoreCircle(cx, cy, radius, angleCount);
+                if (isBetter(candidate, best)) best = candidate;
               }
             }
           }
+          return best;
+        };
+
+        const visited = new Uint8Array(width * height);
+        const queue = new Int32Array(width * height);
+        const redComponents = [];
+        const maxRedArea = minSide * minSide * .018;
+        for (let i = 0; i < red.length; i++) {
+          if (!red[i] || visited[i]) continue;
+          let head = 0, tail = 0, sumX = 0, sumY = 0;
+          let minX = width, maxX = 0, minY = height, maxY = 0;
+          queue[tail++] = i;
+          visited[i] = 1;
+          while (head < tail) {
+            const pixel = queue[head++];
+            const x = pixel % width, y = Math.floor(pixel / width);
+            sumX += x;
+            sumY += y;
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+            for (let oy = -1; oy <= 1; oy++) {
+              for (let ox = -1; ox <= 1; ox++) {
+                if (ox === 0 && oy === 0) continue;
+                const nx = x + ox, ny = y + oy;
+                if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+                const neighbor = ny * width + nx;
+                if (red[neighbor] && !visited[neighbor]) {
+                  visited[neighbor] = 1;
+                  queue[tail++] = neighbor;
+                }
+              }
+            }
+          }
+          const componentWidth = maxX - minX + 1;
+          const componentHeight = maxY - minY + 1;
+          const aspect = componentWidth / componentHeight;
+          if (tail < 5 || tail > maxRedArea || aspect < .5 || aspect > 2) continue;
+          redComponents.push({ x: sumX / tail, y: sumY / tail, area: tail });
         }
-        const candidates = Array.from(radiusScores.values());
-        const strongest = candidates.reduce((score, candidate) => Math.max(score, candidate.score), 0);
-        if (strongest < 18) return null;
-        return candidates
-          .filter(candidate => candidate.score >= strongest * .85)
-          .reduce((largest, candidate) => candidate.r > largest.r ? candidate : largest);
+        redComponents.sort((a, b) => b.area - a.area);
+        let best = null;
+        for (const component of redComponents.slice(0, 8)) {
+          const candidate = searchNear(
+            component,
+            Math.max(3, Math.round(minSide * .018)),
+            2,
+            minRadius,
+            maxRadius,
+            coarseRadiusStep,
+            32,
+            null
+          );
+          if (isBetter(candidate, best)) best = candidate;
+        }
+
+        if (!best || best.score < .32 || best.supportedBoundaries < 4 || best.outerContrast < 12) {
+          best = null;
+          const centerStep = Math.max(4, Math.round(minSide / 64));
+          for (let cy = Math.round(minSide * .1); cy <= height - Math.round(minSide * .1); cy += centerStep) {
+            for (let cx = Math.round(minSide * .1); cx <= width - Math.round(minSide * .1); cx += centerStep) {
+              const candidate = searchNear(
+                { x: cx, y: cy },
+                0,
+                1,
+                minRadius,
+                maxRadius,
+                coarseRadiusStep,
+                24,
+                null
+              );
+              if (isBetter(candidate, best)) best = candidate;
+            }
+          }
+        }
+
+        if (!best || best.score < .32 || best.supportedBoundaries < 4 || best.outerContrast < 12) return null;
+        const refined = searchNear(
+          best,
+          Math.max(2, Math.round(minSide * .008)),
+          1,
+          Math.max(minRadius, best.radius - coarseRadiusStep),
+          Math.min(maxRadius, best.radius + coarseRadiusStep),
+          1,
+          48,
+          best
+        );
+        if (!refined || refined.score < .32 || refined.supportedBoundaries < 4) return null;
+        return {
+          x: refined.x / width,
+          y: refined.y / height,
+          r: refined.radius / minSide,
+          confidence: Math.round(refined.score * 100)
+        };
       }
 
       function sampleGray(data, width, height, x, y) {
@@ -600,10 +753,10 @@
       }
 
       function setTarget(found) {
-        target = { x: found.x, y: found.y, r: found.r };
+        target = { x: found.x, y: found.y, r: found.r, confirmed: true };
         tapStage = 0;
         targetState.textContent = "的を認識しました";
-        cameraHint.textContent = "タップで中心・大きさを調整できます";
+        cameraHint.textContent = "緑枠の範囲が的です — タップで位置・大きさを調整できます";
         drawOverlay();
         if (monitoring) stopMonitoring();
       }
@@ -675,16 +828,31 @@
 
       cameraButton.addEventListener("click", startCamera);
       findButton.addEventListener("click", () => {
-        const image = videoImage(320);
-        const found = image && findCircle(image);
-        if (!found) {
-          targetState.textContent = "自動検出できません — 的をタップ";
-          cameraHint.textContent = "画面をタップして的の中心を指定してください";
-          liveMessage.textContent = "的を検出できませんでした。画面をタップして中心を指定してください。";
-          return;
-        }
-        setTarget(found);
-        liveMessage.textContent = "的を自動検出しました";
+        findButton.disabled = true;
+        const previousLabel = findButton.textContent;
+        findButton.textContent = "検出中…";
+        targetState.textContent = "同心円を解析中…";
+        window.setTimeout(() => {
+          try {
+            const image = videoImage(480);
+            const found = image && findCircle(image);
+            if (!found) {
+              targetState.textContent = "検出できません — 的をタップして指定";
+              cameraHint.textContent = "的全体が入り、反射や影の少ない状態で再試行してください";
+              liveMessage.textContent = "同心円の的を確認できませんでした。的全体を正面から映すか、画面タップで指定してください。";
+              return;
+            }
+            setTarget(found);
+            targetState.textContent = `的を検出しました（信頼度 ${found.confidence}%）`;
+            liveMessage.textContent = `的を検出しました。信頼度 ${found.confidence}%です`;
+          } catch (error) {
+            targetState.textContent = "検出エラー — もう一度お試しください";
+            liveMessage.textContent = `的の解析に失敗しました: ${error.message}`;
+          } finally {
+            findButton.textContent = previousLabel;
+            findButton.disabled = false;
+          }
+        }, 40);
       });
       monitorButton.addEventListener("click", () => {
         if (monitoring) stopMonitoring();
@@ -709,16 +877,17 @@
         const x = (event.clientX - rect.left) / rect.width;
         const y = (event.clientY - rect.top) / rect.height;
         if (tapStage === 0 || !target) {
-          target = { x, y, r: .28 };
+          target = { x, y, r: .28, confirmed: false };
           tapStage = 1;
           targetState.textContent = "中心を設定 — 外周をタップ";
           cameraHint.textContent = "的の外周をタップして大きさを設定してください";
           drawOverlay();
         } else {
           target.r = Math.max(.08, Math.min(.49, Math.hypot((x - target.x) * overlay.width, (y - target.y) * overlay.height) / Math.min(overlay.width, overlay.height)));
+          target.confirmed = true;
           tapStage = 0;
           targetState.textContent = "的を手動設定しました";
-          cameraHint.textContent = "タップで中心・大きさを調整できます";
+          cameraHint.textContent = "緑枠の範囲が的です — タップで位置・大きさを調整できます";
           drawOverlay();
         }
       });
