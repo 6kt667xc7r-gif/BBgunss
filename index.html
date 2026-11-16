@@ -155,6 +155,7 @@
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
       <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
+      <p class="muted">穴候補は大きさ・形・暗さを確認し、連続する監視フレームで確認できた場合に加点します。一時的な影や光の変化による誤検出を抑えます。</p>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
 
@@ -874,6 +875,7 @@
         const targetAngle = target.angle || 0;
         const referenceRadiusX = (referenceTarget.rx || referenceTarget.r) * minSide;
         const referenceRadiusY = (referenceTarget.ry || referenceTarget.r) * minSide;
+        const targetMinorRadius = Math.min(referenceRadiusX, referenceRadiusY);
         const targetRadiusX = (target.rx || target.r) * minSide;
         const targetRadiusY = (target.ry || target.r) * minSide;
         const referenceCosine = Math.cos(referenceAngle), referenceSine = Math.sin(referenceAngle);
@@ -883,6 +885,7 @@
         const cols = Math.ceil(width / step);
         const rows = Math.ceil(height / step);
         const mask = new Uint8Array(cols * rows);
+        const livePixelIndices = new Uint32Array(cols * rows);
         for (let gy = 0; gy < rows; gy++) {
           const y = Math.min(height - 1, gy * step);
           for (let gx = 0; gx < cols; gx++) {
@@ -901,8 +904,12 @@
             if (liveX < 0 || liveX >= width || liveY < 0 || liveY >= height) continue;
             const index = liveY * width + liveX;
             const oldGray = sampleGray(baseline.data, width, height, x, y);
-            const gray = sampleGray(data, width, height, x, y);
-            if (oldGray > 95 && oldGray - gray > threshold) mask[gy * cols + gx] = 1;
+            const gray = sampleGray(data, width, height, liveX, liveY);
+            if (oldGray > 95 && oldGray - gray > threshold) {
+              const maskIndex = gy * cols + gx;
+              mask[maskIndex] = 1;
+              livePixelIndices[maskIndex] = index;
+            }
           }
         }
         const seen = new Uint8Array(mask.length);
@@ -912,12 +919,23 @@
           const queue = [i];
           seen[i] = 1;
           let head = 0, area = 0, sx = 0, sy = 0;
+          let minGX = cols, maxGX = -1, minGY = rows, maxGY = -1;
+          let sumPreviousGray = 0, sumCurrentGray = 0;
           while (head < queue.length) {
             const p = queue[head++];
             const gx = p % cols, gy = Math.floor(p / cols);
             area++;
-            sx += Math.min(width - 1, gx * step);
-            sy += Math.min(height - 1, gy * step);
+            const pixelX = Math.min(width - 1, gx * step);
+            const pixelY = Math.min(height - 1, gy * step);
+            sx += pixelX;
+            sy += pixelY;
+            minGX = Math.min(minGX, gx);
+            maxGX = Math.max(maxGX, gx);
+            minGY = Math.min(minGY, gy);
+            maxGY = Math.max(maxGY, gy);
+            sumPreviousGray += sampleGray(baseline.data, width, height, pixelX, pixelY);
+            const currentPixelIndex = livePixelIndices[p];
+            sumCurrentGray += sampleGray(data, width, height, currentPixelIndex % width, Math.floor(currentPixelIndex / width));
             const neighbors = [p - 1, p + 1, p - cols, p + cols];
             for (const q of neighbors) {
               if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
@@ -928,11 +946,21 @@
           }
           const areaPixels = area * step * step;
           const minArea = Math.max(5, minSide * minSide * .000035);
-          const maxArea = minSide * minSide * .008;
-          if (areaPixels < minArea || areaPixels > maxArea) continue;
+          const maxArea = Math.min(minSide * minSide * .004, Math.max(36, targetMinorRadius * targetMinorRadius * .035));
+          const boundsWidth = (maxGX - minGX + 1) * step;
+          const boundsHeight = (maxGY - minGY + 1) * step;
+          const aspect = boundsWidth / boundsHeight;
+          const compactness = area / ((maxGX - minGX + 1) * (maxGY - minGY + 1));
+          const maxDiameter = Math.max(6, targetMinorRadius * .22);
+          const meanCurrentGray = sumCurrentGray / area;
+          const meanChange = (sumPreviousGray - sumCurrentGray) / area;
+          if (areaPixels < minArea || areaPixels > maxArea ||
+              boundsWidth > maxDiameter || boundsHeight > maxDiameter ||
+              aspect < .35 || aspect > 2.8 || compactness < .22 ||
+              meanCurrentGray > 140 || meanChange < 65) continue;
           const x = sx / area / width, y = sy / area / height;
           if (normalizedTargetDistance(x * width - centerX, y * height - centerY, referenceTarget, minSide) > .98) continue;
-          candidates.push({ x, y });
+          candidates.push({ x, y, width: boundsWidth, height: boundsHeight, area: areaPixels });
         }
         return candidates;
       }
@@ -983,8 +1011,12 @@
           if (target.confirmed && targetTrackingMisses === 0) {
             const candidates = detectCandidates(image);
             for (const candidate of candidates) {
-              const matchedPrevious = previousCandidates.some(old => Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12);
-              if (matchedPrevious) continue;
+              const matchedPrevious = previousCandidates.some(old =>
+                Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 8 &&
+                Math.abs(old.width - candidate.width) <= Math.max(3, old.width * .4) &&
+                Math.abs(old.height - candidate.height) <= Math.max(3, old.height * .4)
+              );
+              if (!matchedPrevious) continue;
               const nearRecorded = hits.some(hit => Math.hypot((hit.x - candidate.x) * image.width, (hit.y - candidate.y) * image.height) < 14);
               if (nearRecorded) continue;
               const score = scoreHit(candidate);
