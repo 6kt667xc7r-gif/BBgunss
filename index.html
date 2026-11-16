@@ -56,6 +56,7 @@
     .muted { color: #a9b5a4; font-size: .76rem; line-height: 1.55; }
     .setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; color: #dce3d8; font-size: .85rem; }
     input[type="range"] { width: 46%; accent-color: #a7e278; }
+    input[type="checkbox"] { width: 20px; height: 20px; accent-color: #a7e278; }
     .hits { display: grid; gap: 7px; }
     .hit { display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; border-radius: 9px; background: #253128; font-size: .86rem; }
     .hit strong { color: #b9ee94; }
@@ -141,6 +142,8 @@
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
       <p class="muted">的を認識すると、カメラ起動中は0.1秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
+      <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
+      <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
 
@@ -177,6 +180,7 @@
       const rapidDuration = document.getElementById("rapidDuration");
       const rapidCountdown = document.getElementById("rapidCountdown");
       const rapidTimer = document.getElementById("rapidTimer");
+      const hitVoiceToggle = document.getElementById("hitVoiceToggle");
       const stopButton = document.getElementById("stopButton");
       const resetButton = document.getElementById("resetButton");
       const undoButton = document.getElementById("undoButton");
@@ -199,6 +203,7 @@
       let trackingTimeoutId = null;
       let targetTrackingMisses = 0;
       let lastFullTargetScanAt = 0;
+      let audioContext = null;
       let hits = [];
       let previousCandidates = [];
       let tapStage = 0;
@@ -210,6 +215,67 @@
       function setStatus(text, state) {
         statusText.textContent = text;
         status.dataset.state = state;
+      }
+
+      function prepareAudioContext() {
+        const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextConstructor) {
+          liveMessage.textContent = "このブラウザは開始音に対応していません。";
+          return;
+        }
+        try {
+          if (!audioContext) audioContext = new AudioContextConstructor();
+          if (audioContext.state === "suspended") {
+            audioContext.resume().catch(error => {
+              liveMessage.textContent = `開始音を準備できませんでした: ${error.message}`;
+            });
+          }
+        } catch (error) {
+          liveMessage.textContent = `開始音を準備できませんでした: ${error.message}`;
+        }
+      }
+
+      function playStartBeep() {
+        if (!audioContext || audioContext.state !== "running") {
+          liveMessage.textContent = "開始音を再生できません。ブラウザの音声設定を確認してください。";
+          return;
+        }
+        try {
+          const oscillator = audioContext.createOscillator();
+          const gain = audioContext.createGain();
+          const now = audioContext.currentTime;
+          oscillator.type = "sine";
+          oscillator.frequency.setValueAtTime(880, now);
+          gain.gain.setValueAtTime(.0001, now);
+          gain.gain.exponentialRampToValueAtTime(.24, now + .03);
+          gain.gain.setValueAtTime(.24, now + .72);
+          gain.gain.exponentialRampToValueAtTime(.0001, now + .82);
+          oscillator.connect(gain);
+          gain.connect(audioContext.destination);
+          oscillator.start(now);
+          oscillator.stop(now + .83);
+        } catch (error) {
+          liveMessage.textContent = `開始音を再生できませんでした: ${error.message}`;
+        }
+      }
+
+      function speakJapanese(text) {
+        if (!window.speechSynthesis || typeof window.SpeechSynthesisUtterance !== "function") {
+          liveMessage.textContent = "このブラウザは音声読み上げに対応していません。";
+          return;
+        }
+        try {
+          const utterance = new window.SpeechSynthesisUtterance(text);
+          utterance.lang = "ja-JP";
+          utterance.onerror = event => {
+            if (event.error !== "canceled" && event.error !== "interrupted") {
+              liveMessage.textContent = `音声読み上げに失敗しました: ${event.error}`;
+            }
+          };
+          window.speechSynthesis.speak(utterance);
+        } catch (error) {
+          liveMessage.textContent = `音声読み上げに失敗しました: ${error.message}`;
+        }
       }
 
       function dimensions() {
@@ -638,6 +704,7 @@
                 hits.push({ ...candidate, score });
                 renderHits();
                 liveMessage.textContent = `${score}点で命中を検出しました`;
+                if (hitVoiceToggle.checked) speakJapanese(`${score}点です`);
                 if (hits.length >= Number(shotLimit.value) && rapidPhase === "running") {
                   finishTrainingRound("shots");
                   return;
@@ -770,6 +837,7 @@
           return;
         }
         if (monitoring || rapidPhase === "running") return;
+        prepareAudioContext();
         const countdownSeconds = Number(rapidCountdown.value);
         const countdownEnds = Date.now() + countdownSeconds * 1000;
         rapidPhase = "countdown";
@@ -799,6 +867,7 @@
               trainingMode.disabled = false;
               return;
             }
+            playStartBeep();
             updateRapidTimer();
             rapidIntervalId = window.setInterval(updateRapidTimer, 100);
             return;
@@ -839,6 +908,9 @@
           ? `${currentTrainingName()}結果（${ending}）：${hits.length}発、合計${total}点、平均${average}点`
           : `早撃ち結果（${ending}）：${hits.length}発、合計${total}点`;
         trainingResult.textContent = result;
+        speakJapanese(trainingMode.value === "accuracy"
+          ? `合計${total}点です。平均${average}点です。`
+          : `合計${total}点です。`);
         setStatus("トレーニング終了", "active");
         cameraHint.textContent = `終了 — ${hits.length}発・${total}点`;
         liveMessage.textContent = result;
