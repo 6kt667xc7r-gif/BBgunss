@@ -87,7 +87,7 @@
         <video id="video" autoplay muted playsinline aria-label="ライブカメラ映像"></video>
         <canvas id="overlay" aria-label="検出ターゲット。タップして中心と大きさを調整"></canvas>
         <div id="placeholder" class="camera-placeholder">カメラを起動すると、ここにターゲットが表示されます。</div>
-        <div id="cameraHint" class="camera-hint">的全体が画面に入るようにカメラを固定してください</div>
+        <div id="cameraHint" class="camera-hint">的を認識すると、位置を0.5秒ごとに自動補正します</div>
       </div>
       <div class="controls">
         <button id="cameraButton" class="primary">カメラを起動</button>
@@ -103,7 +103,7 @@
 
     <section class="card section" aria-label="射撃トレーニング">
       <div class="section-heading"><h2 id="trainingTitle">早撃ちチャレンジ</h2><span id="rapidTimer" class="rapid-timer" role="timer" aria-live="off">00:30</span></div>
-      <p id="trainingDescription" class="muted">紙の的にカメラを固定して練習します。準備時間のカウントダウン後、制限時間内の命中を計測します。</p>
+      <p id="trainingDescription" class="muted">紙の的を映して練習します。的の位置は0.5秒ごとに自動補正されます。準備時間のカウントダウン後、制限時間内の命中を計測します。</p>
       <div class="rapid-controls">
         <label class="sr-only" for="trainingMode">練習モード</label>
         <select id="trainingMode" aria-label="練習モード">
@@ -139,7 +139,7 @@
 
     <section class="card section">
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
-      <p class="muted">自動検出後、映像の的をタップすると中心を合わせられます。タップした位置を中心に、もう一度タップすると的の大きさを調整できます。</p>
+      <p class="muted">的を認識すると、カメラ起動中は0.5秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
@@ -152,7 +152,7 @@
         <button id="stopButton" disabled>カメラを停止</button>
       </div>
     </section>
-    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。カメラを固定し、監視開始後に撃ってください。照明や手ブレで誤検出することがあるため、結果を目視で確認してください。</p>
+    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。的全体が画面に入るようにカメラを向けてください。位置は0.5秒ごとに自動補正しますが、大きな揺れやブレでは検出できないことがあります。</p>
     <div id="liveMessage" class="sr-only" aria-live="polite"></div>
     <canvas id="work" class="sr-only"></canvas>
   </main>
@@ -191,10 +191,12 @@
       const liveMessage = document.getElementById("liveMessage");
       let stream = null;
       let target = null;
+      let monitorTarget = null;
       let baseline = null;
       let monitoring = false;
       let loopId = null;
-      let frameCount = 0;
+      let trackingTimeoutId = null;
+      let targetTrackingMisses = 0;
       let hits = [];
       let previousCandidates = [];
       let tapStage = 0;
@@ -311,15 +313,15 @@
         return { width, height, data: workCtx.getImageData(0, 0, width, height).data };
       }
 
-      function findCircle(image) {
+      function findCircle(image, previousTarget = null) {
         const { width, height, data } = image;
         const minSide = Math.min(width, height);
         const gray = new Uint8Array(width * height);
-        const red = new Uint8Array(width * height);
+        const red = previousTarget ? null : new Uint8Array(width * height);
         for (let i = 0, pixel = 0; i < data.length; i += 4, pixel++) {
           const r = data[i], g = data[i + 1], b = data[i + 2];
           gray[pixel] = r * .299 + g * .587 + b * .114;
-          red[pixel] = r > 75 && r > g * 1.35 && r > b * 1.2 && g < 185 ? 1 : 0;
+          if (red) red[pixel] = r > 75 && r > g * 1.35 && r > b * 1.2 && g < 185 ? 1 : 0;
         }
 
         const boundaries = [1, .8, .56, .39, .2, .1];
@@ -382,6 +384,47 @@
           }
           return best;
         };
+
+        const isValid = candidate => candidate &&
+          candidate.score >= .32 &&
+          candidate.supportedBoundaries >= 4 &&
+          candidate.outerContrast >= 12;
+        const toFound = candidate => ({
+          x: candidate.x / width,
+          y: candidate.y / height,
+          r: candidate.radius / minSide,
+          confidence: Math.round(candidate.score * 100)
+        });
+
+        if (previousTarget) {
+          const previousRadius = previousTarget.r * minSide;
+          const radiusRange = Math.max(4, Math.round(minSide * .05));
+          const centerRange = Math.max(5, Math.round(minSide * .1));
+          const coarseStep = Math.max(2, Math.round(minSide * .008));
+          let best = searchNear(
+            { x: previousTarget.x * width, y: previousTarget.y * height },
+            centerRange,
+            coarseStep,
+            Math.max(minRadius, Math.round(previousRadius - radiusRange)),
+            Math.min(maxRadius, Math.round(previousRadius + radiusRange)),
+            coarseStep,
+            24,
+            null
+          );
+          if (!isValid(best)) return null;
+          const refineRange = Math.max(2, Math.round(minSide * .012));
+          const refined = searchNear(
+            best,
+            Math.max(2, Math.round(minSide * .008)),
+            1,
+            Math.max(minRadius, best.radius - refineRange),
+            Math.min(maxRadius, best.radius + refineRange),
+            1,
+            48,
+            best
+          );
+          return isValid(refined) ? toFound(refined) : null;
+        }
 
         const visited = new Uint8Array(width * height);
         const queue = new Int32Array(width * height);
@@ -469,12 +512,7 @@
           best
         );
         if (!refined || refined.score < .32 || refined.supportedBoundaries < 4) return null;
-        return {
-          x: refined.x / width,
-          y: refined.y / height,
-          r: refined.radius / minSide,
-          confidence: Math.round(refined.score * 100)
-        };
+        return toFound(refined);
       }
 
       function sampleGray(data, width, height, x, y) {
@@ -485,9 +523,13 @@
       function detectCandidates(image) {
         const { width, height, data } = image;
         const minSide = Math.min(width, height);
-        const centerX = target.x * width;
-        const centerY = target.y * height;
-        const radius = target.r * minSide;
+        const referenceTarget = monitorTarget || target;
+        const centerX = referenceTarget.x * width;
+        const centerY = referenceTarget.y * height;
+        const liveCenterX = target.x * width;
+        const liveCenterY = target.y * height;
+        const scale = target.r / referenceTarget.r;
+        const radius = referenceTarget.r * minSide;
         const step = Math.max(1, Math.round(minSide / 260));
         const threshold = Number(sensitivity.value);
         const cols = Math.ceil(width / step);
@@ -499,7 +541,10 @@
             const x = Math.min(width - 1, gx * step);
             const dx = x - centerX, dy = y - centerY;
             if (dx * dx + dy * dy > radius * radius * .96) continue;
-            const index = y * width + x;
+            const liveX = Math.round(liveCenterX + dx * scale);
+            const liveY = Math.round(liveCenterY + dy * scale);
+            if (liveX < 0 || liveX >= width || liveY < 0 || liveY >= height) continue;
+            const index = liveY * width + liveX;
             const oldGray = sampleGray(baseline.data, width, height, x, y);
             const gray = sampleGray(data, width, height, x, y);
             if (oldGray > 95 && oldGray - gray > threshold) mask[gy * cols + gx] = 1;
@@ -538,9 +583,10 @@
       }
 
       function scoreHit(point) {
+        const referenceTarget = monitorTarget || target;
         const minSide = Math.min(video.videoWidth, video.videoHeight);
-        const distance = Math.hypot((point.x - target.x) * video.videoWidth, (point.y - target.y) * video.videoHeight);
-        const normalized = distance / (target.r * minSide);
+        const distance = Math.hypot((point.x - referenceTarget.x) * video.videoWidth, (point.y - referenceTarget.y) * video.videoHeight);
+        const normalized = distance / (referenceTarget.r * minSide);
         if (normalized > 1) return 0;
         if (normalized <= .1) return 10;
         if (normalized <= .2) return 9;
@@ -574,30 +620,106 @@
 
       function monitorFrame() {
         if (!monitoring || !baseline || !target || video.readyState < 2) return;
-        const image = videoImage(320);
-        if (!image) return;
-        frameCount++;
-        if (frameCount % 2 === 0) {
-          const candidates = detectCandidates(image);
-          for (const candidate of candidates) {
-            const matchedPrevious = previousCandidates.some(old => Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12);
-            if (matchedPrevious) continue;
-            const nearRecorded = hits.some(hit => Math.hypot((hit.x - candidate.x) * image.width, (hit.y - candidate.y) * image.height) < 14);
-            if (nearRecorded) continue;
-            const score = scoreHit(candidate);
-            if (score > 0) {
-              hits.push({ ...candidate, score });
-              renderHits();
-              liveMessage.textContent = `${score}点で命中を検出しました`;
-              if (hits.length >= Number(shotLimit.value) && rapidPhase === "running") {
-                finishTrainingRound("shots");
-                return;
+        const frameStartedAt = Date.now();
+        try {
+          const trackingImage = videoImage(480);
+          let targetMoved = false;
+          if (trackingImage && updateTargetPosition(trackingImage) && monitorTarget) {
+            const centerShift = Math.hypot(
+              (target.x - monitorTarget.x) * baseline.width,
+              (target.y - monitorTarget.y) * baseline.height
+            );
+            const radiusShift = Math.abs(target.r - monitorTarget.r) * Math.min(baseline.width, baseline.height);
+            if (centerShift > 3 || radiusShift > 2) {
+              targetMoved = true;
+              if (!rebaseMonitorBaseline()) {
+                targetTrackingMisses = 1;
+                liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
               }
             }
           }
-          previousCandidates = candidates;
+          const image = videoImage(320);
+          if (!image) return;
+          if (!targetMoved && target.confirmed && targetTrackingMisses === 0) {
+            const candidates = detectCandidates(image);
+            for (const candidate of candidates) {
+              const matchedPrevious = previousCandidates.some(old => Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12);
+              if (matchedPrevious) continue;
+              const nearRecorded = hits.some(hit => Math.hypot((hit.x - candidate.x) * image.width, (hit.y - candidate.y) * image.height) < 14);
+              if (nearRecorded) continue;
+              const score = scoreHit(candidate);
+              if (score > 0) {
+                hits.push({ ...candidate, score });
+                renderHits();
+                liveMessage.textContent = `${score}点で命中を検出しました`;
+                if (hits.length >= Number(shotLimit.value) && rapidPhase === "running") {
+                  finishTrainingRound("shots");
+                  return;
+                }
+              }
+            }
+            previousCandidates = candidates;
+          }
+        } catch (error) {
+          targetState.textContent = "命中監視エラー";
+          liveMessage.textContent = `命中監視に失敗しました: ${error.message}`;
+        } finally {
+          if (monitoring) loopId = window.setTimeout(monitorFrame, Math.max(0, 500 - (Date.now() - frameStartedAt)));
         }
-        loopId = window.setTimeout(monitorFrame, 450);
+      }
+
+      function rebaseMonitorBaseline() {
+        const image = videoImage(320);
+        if (!image) return false;
+        baseline = image;
+        monitorTarget = { x: target.x, y: target.y, r: target.r };
+        previousCandidates = [];
+        return true;
+      }
+
+      function updateTargetPosition(image) {
+        const previousMisses = targetTrackingMisses;
+        let found = findCircle(image, target);
+        if (!found && targetTrackingMisses >= 2) found = findCircle(image);
+        if (found) {
+          target = { ...target, x: found.x, y: found.y, r: found.r, confirmed: true };
+          targetTrackingMisses = 0;
+          drawOverlay();
+          if (monitoring && previousMisses > 0 && !rebaseMonitorBaseline()) {
+            targetTrackingMisses = 1;
+            liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
+          }
+          if (targetState.textContent === "的を再探索中…" || targetState.textContent === "位置補正エラー — 再試行中") {
+            targetState.textContent = monitoring ? "命中監視中・自動追跡中" : "的を自動追跡中";
+          }
+          return true;
+        }
+        targetTrackingMisses++;
+        if (targetTrackingMisses === 1) targetState.textContent = "的を再探索中…";
+        return false;
+      }
+
+      function trackTargetPosition() {
+        trackingTimeoutId = null;
+        if (!stream || !target || !target.confirmed) return;
+        const trackingStartedAt = Date.now();
+        try {
+          if (video.readyState >= 2) {
+            const image = videoImage(480);
+            if (image) updateTargetPosition(image);
+          }
+        } catch (error) {
+          targetTrackingMisses++;
+          targetState.textContent = "位置補正エラー — 再試行中";
+          liveMessage.textContent = `的の位置補正に失敗しました: ${error.message}`;
+        } finally {
+          if (!monitoring) scheduleTargetTracking(Math.max(0, 500 - (Date.now() - trackingStartedAt)));
+        }
+      }
+
+      function scheduleTargetTracking(delay = 500) {
+        if (trackingTimeoutId !== null || monitoring || !stream || !target || !target.confirmed) return;
+        trackingTimeoutId = window.setTimeout(trackTargetPosition, delay);
       }
 
       function formatTime(seconds) {
@@ -618,8 +740,8 @@
         const accuracy = trainingMode.value === "accuracy";
         trainingTitle.textContent = accuracy ? "静止精度チャレンジ" : "早撃ちチャレンジ";
         trainingDescription.textContent = accuracy
-          ? "紙の的とカメラを固定して練習します。設定した発数または制限時間までの平均得点を記録します。"
-          : "紙の的とカメラを固定して練習します。設定した発数または制限時間までの命中を計測します。";
+          ? "紙の的を映して練習します。位置を0.5秒ごとに自動補正し、設定した発数または制限時間までの平均得点を記録します。"
+          : "紙の的を映して練習します。位置を0.5秒ごとに自動補正し、設定した発数または制限時間までの命中を計測します。";
         rapidButton.textContent = startTrainingLabel();
         trainingResult.textContent = accuracy
           ? "設定した命中数に達するか、制限時間が終わると自動終了し、平均得点を表示します。"
@@ -699,6 +821,8 @@
         loopId = null;
         monitoring = false;
         baseline = null;
+        monitorTarget = null;
+        scheduleTargetTracking();
         monitorButton.textContent = "監視を開始";
         rapidPhase = "finished";
         rapidTimer.textContent = reason === "shots" ? "完了" : "終了";
@@ -754,11 +878,13 @@
 
       function setTarget(found) {
         target = { x: found.x, y: found.y, r: found.r, confirmed: true };
+        targetTrackingMisses = 0;
         tapStage = 0;
-        targetState.textContent = "的を認識しました";
-        cameraHint.textContent = "緑枠の範囲が的です — タップで位置・大きさを調整できます";
+        targetState.textContent = "的を自動追跡中";
+        cameraHint.textContent = "的の位置を0.5秒ごとに自動補正中 — タップで手動調整できます";
         drawOverlay();
         if (monitoring) stopMonitoring();
+        scheduleTargetTracking();
       }
 
       function stopMonitoring() {
@@ -766,6 +892,8 @@
         if (loopId !== null) window.clearTimeout(loopId);
         loopId = null;
         baseline = null;
+        monitorTarget = null;
+        targetTrackingMisses = 0;
         if (countdownId !== null) window.clearInterval(countdownId);
         if (rapidIntervalId !== null) window.clearInterval(rapidIntervalId);
         countdownId = null;
@@ -781,6 +909,7 @@
         }
         monitorButton.textContent = "監視を開始";
         setStatus("カメラ接続中", "active");
+        scheduleTargetTracking();
       }
 
       function startMonitoring() {
@@ -794,19 +923,24 @@
         baseline = image;
         hits = [];
         previousCandidates = [];
-        frameCount = 0;
         renderHits();
         monitoring = true;
+        if (trackingTimeoutId !== null) window.clearTimeout(trackingTimeoutId);
+        trackingTimeoutId = null;
         monitorButton.textContent = "監視中";
         setStatus("命中を監視中", "active");
-        cameraHint.textContent = "監視中 — カメラを固定してください";
+        cameraHint.textContent = "命中監視中 — 的の位置を0.5秒ごとに自動補正します";
         liveMessage.textContent = "監視を開始しました";
+        monitorTarget = { x: target.x, y: target.y, r: target.r };
+        targetTrackingMisses = 0;
         monitorFrame();
         return true;
       }
 
       function stopCamera() {
         stopMonitoring();
+        if (trackingTimeoutId !== null) window.clearTimeout(trackingTimeoutId);
+        trackingTimeoutId = null;
         if (stream) stream.getTracks().forEach(track => track.stop());
         stream = null;
         video.srcObject = null;
@@ -821,7 +955,7 @@
         target = null;
         baseline = null;
         targetState.textContent = "的を未検出";
-        cameraHint.textContent = "的全体が画面に入るようにカメラを固定してください";
+        cameraHint.textContent = "的を認識すると、位置を0.5秒ごとに自動補正します";
         drawOverlay();
         setStatus("カメラ未接続", "idle");
       }
@@ -878,6 +1012,7 @@
         const y = (event.clientY - rect.top) / rect.height;
         if (tapStage === 0 || !target) {
           target = { x, y, r: .28, confirmed: false };
+          targetTrackingMisses = 0;
           tapStage = 1;
           targetState.textContent = "中心を設定 — 外周をタップ";
           cameraHint.textContent = "的の外周をタップして大きさを設定してください";
@@ -886,9 +1021,14 @@
           target.r = Math.max(.08, Math.min(.49, Math.hypot((x - target.x) * overlay.width, (y - target.y) * overlay.height) / Math.min(overlay.width, overlay.height)));
           target.confirmed = true;
           tapStage = 0;
-          targetState.textContent = "的を手動設定しました";
-          cameraHint.textContent = "緑枠の範囲が的です — タップで位置・大きさを調整できます";
+          targetState.textContent = "的を手動設定・自動追跡中";
+          cameraHint.textContent = "的の位置を0.5秒ごとに自動補正中 — タップで手動調整できます";
           drawOverlay();
+          targetTrackingMisses = 0;
+          if (monitoring && !rebaseMonitorBaseline()) {
+            liveMessage.textContent = "映像を取得できず、監視基準を更新できませんでした。";
+          }
+          scheduleTargetTracking();
         }
       });
       window.addEventListener("orientationchange", () => window.setTimeout(dimensions, 250));
