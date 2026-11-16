@@ -87,7 +87,7 @@
         <video id="video" autoplay muted playsinline aria-label="ライブカメラ映像"></video>
         <canvas id="overlay" aria-label="検出ターゲット。タップして中心と大きさを調整"></canvas>
         <div id="placeholder" class="camera-placeholder">カメラを起動すると、ここにターゲットが表示されます。</div>
-        <div id="cameraHint" class="camera-hint">的を認識すると、位置を0.5秒ごとに自動補正します</div>
+        <div id="cameraHint" class="camera-hint">的を認識すると、位置を0.1秒ごとに自動補正します</div>
       </div>
       <div class="controls">
         <button id="cameraButton" class="primary">カメラを起動</button>
@@ -103,7 +103,7 @@
 
     <section class="card section" aria-label="射撃トレーニング">
       <div class="section-heading"><h2 id="trainingTitle">早撃ちチャレンジ</h2><span id="rapidTimer" class="rapid-timer" role="timer" aria-live="off">00:30</span></div>
-      <p id="trainingDescription" class="muted">紙の的を映して練習します。的の位置は0.5秒ごとに自動補正されます。準備時間のカウントダウン後、制限時間内の命中を計測します。</p>
+      <p id="trainingDescription" class="muted">紙の的を映して練習します。的の位置は0.1秒ごとに自動補正されます。準備時間のカウントダウン後、制限時間内の命中を計測します。</p>
       <div class="rapid-controls">
         <label class="sr-only" for="trainingMode">練習モード</label>
         <select id="trainingMode" aria-label="練習モード">
@@ -139,7 +139,7 @@
 
     <section class="card section">
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
-      <p class="muted">的を認識すると、カメラ起動中は0.5秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
+      <p class="muted">的を認識すると、カメラ起動中は0.1秒ごとに位置と大きさを自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
@@ -152,7 +152,7 @@
         <button id="stopButton" disabled>カメラを停止</button>
       </div>
     </section>
-    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。的全体が画面に入るようにカメラを向けてください。位置は0.5秒ごとに自動補正しますが、大きな揺れやブレでは検出できないことがあります。</p>
+    <p class="notice">初回は「カメラを起動」を許可してください。iPhoneのSafariではHTTPS接続が必要です。的全体が画面に入るようにカメラを向けてください。位置は0.1秒ごとに自動補正しますが、大きな揺れやブレでは検出できないことがあります。</p>
     <div id="liveMessage" class="sr-only" aria-live="polite"></div>
     <canvas id="work" class="sr-only"></canvas>
   </main>
@@ -189,6 +189,7 @@
       const totalElement = document.getElementById("total");
       const countElement = document.getElementById("count");
       const liveMessage = document.getElementById("liveMessage");
+      const targetTrackingInterval = 100;
       let stream = null;
       let target = null;
       let monitorTarget = null;
@@ -197,6 +198,7 @@
       let loopId = null;
       let trackingTimeoutId = null;
       let targetTrackingMisses = 0;
+      let lastFullTargetScanAt = 0;
       let hits = [];
       let previousCandidates = [];
       let tapStage = 0;
@@ -398,9 +400,9 @@
 
         if (previousTarget) {
           const previousRadius = previousTarget.r * minSide;
-          const radiusRange = Math.max(4, Math.round(minSide * .05));
-          const centerRange = Math.max(5, Math.round(minSide * .1));
-          const coarseStep = Math.max(2, Math.round(minSide * .008));
+          const radiusRange = Math.max(4, Math.round(minSide * .04));
+          const centerRange = Math.max(5, Math.round(minSide * .08));
+          const coarseStep = Math.max(2, Math.round(minSide * .01));
           let best = searchNear(
             { x: previousTarget.x * width, y: previousTarget.y * height },
             centerRange,
@@ -408,7 +410,7 @@
             Math.max(minRadius, Math.round(previousRadius - radiusRange)),
             Math.min(maxRadius, Math.round(previousRadius + radiusRange)),
             coarseStep,
-            24,
+            20,
             null
           );
           if (!isValid(best)) return null;
@@ -622,25 +624,9 @@
         if (!monitoring || !baseline || !target || video.readyState < 2) return;
         const frameStartedAt = Date.now();
         try {
-          const trackingImage = videoImage(480);
-          let targetMoved = false;
-          if (trackingImage && updateTargetPosition(trackingImage) && monitorTarget) {
-            const centerShift = Math.hypot(
-              (target.x - monitorTarget.x) * baseline.width,
-              (target.y - monitorTarget.y) * baseline.height
-            );
-            const radiusShift = Math.abs(target.r - monitorTarget.r) * Math.min(baseline.width, baseline.height);
-            if (centerShift > 3 || radiusShift > 2) {
-              targetMoved = true;
-              if (!rebaseMonitorBaseline()) {
-                targetTrackingMisses = 1;
-                liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
-              }
-            }
-          }
           const image = videoImage(320);
           if (!image) return;
-          if (!targetMoved && target.confirmed && targetTrackingMisses === 0) {
+          if (target.confirmed && targetTrackingMisses === 0) {
             const candidates = detectCandidates(image);
             for (const candidate of candidates) {
               const matchedPrevious = previousCandidates.some(old => Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12);
@@ -680,7 +666,11 @@
       function updateTargetPosition(image) {
         const previousMisses = targetTrackingMisses;
         let found = findCircle(image, target);
-        if (!found && targetTrackingMisses >= 2) found = findCircle(image);
+        const now = Date.now();
+        if (!found && targetTrackingMisses >= 2 && now - lastFullTargetScanAt >= 500) {
+          lastFullTargetScanAt = now;
+          found = findCircle(image);
+        }
         if (found) {
           target = { ...target, x: found.x, y: found.y, r: found.r, confirmed: true };
           targetTrackingMisses = 0;
@@ -688,6 +678,17 @@
           if (monitoring && previousMisses > 0 && !rebaseMonitorBaseline()) {
             targetTrackingMisses = 1;
             liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
+          }
+          if (monitoring && previousMisses === 0 && monitorTarget) {
+            const centerShift = Math.hypot(
+              (target.x - monitorTarget.x) * baseline.width,
+              (target.y - monitorTarget.y) * baseline.height
+            );
+            const radiusShift = Math.abs(target.r - monitorTarget.r) * Math.min(baseline.width, baseline.height);
+            if ((centerShift > 3 || radiusShift > 2) && !rebaseMonitorBaseline()) {
+              targetTrackingMisses = 1;
+              liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
+            }
           }
           if (targetState.textContent === "的を再探索中…" || targetState.textContent === "位置補正エラー — 再試行中") {
             targetState.textContent = monitoring ? "命中監視中・自動追跡中" : "的を自動追跡中";
@@ -705,7 +706,7 @@
         const trackingStartedAt = Date.now();
         try {
           if (video.readyState >= 2) {
-            const image = videoImage(480);
+            const image = videoImage(320);
             if (image) updateTargetPosition(image);
           }
         } catch (error) {
@@ -713,12 +714,12 @@
           targetState.textContent = "位置補正エラー — 再試行中";
           liveMessage.textContent = `的の位置補正に失敗しました: ${error.message}`;
         } finally {
-          if (!monitoring) scheduleTargetTracking(Math.max(0, 500 - (Date.now() - trackingStartedAt)));
+          scheduleTargetTracking(Math.max(10, targetTrackingInterval - (Date.now() - trackingStartedAt)));
         }
       }
 
-      function scheduleTargetTracking(delay = 500) {
-        if (trackingTimeoutId !== null || monitoring || !stream || !target || !target.confirmed) return;
+      function scheduleTargetTracking(delay = targetTrackingInterval) {
+        if (trackingTimeoutId !== null || !stream || !target || !target.confirmed) return;
         trackingTimeoutId = window.setTimeout(trackTargetPosition, delay);
       }
 
@@ -740,8 +741,8 @@
         const accuracy = trainingMode.value === "accuracy";
         trainingTitle.textContent = accuracy ? "静止精度チャレンジ" : "早撃ちチャレンジ";
         trainingDescription.textContent = accuracy
-          ? "紙の的を映して練習します。位置を0.5秒ごとに自動補正し、設定した発数または制限時間までの平均得点を記録します。"
-          : "紙の的を映して練習します。位置を0.5秒ごとに自動補正し、設定した発数または制限時間までの命中を計測します。";
+          ? "紙の的を映して練習します。位置を0.1秒ごとに自動補正し、設定した発数または制限時間までの平均得点を記録します。"
+          : "紙の的を映して練習します。位置を0.1秒ごとに自動補正し、設定した発数または制限時間までの命中を計測します。";
         rapidButton.textContent = startTrainingLabel();
         trainingResult.textContent = accuracy
           ? "設定した命中数に達するか、制限時間が終わると自動終了し、平均得点を表示します。"
@@ -879,9 +880,10 @@
       function setTarget(found) {
         target = { x: found.x, y: found.y, r: found.r, confirmed: true };
         targetTrackingMisses = 0;
+        lastFullTargetScanAt = Date.now();
         tapStage = 0;
         targetState.textContent = "的を自動追跡中";
-        cameraHint.textContent = "的の位置を0.5秒ごとに自動補正中 — タップで手動調整できます";
+        cameraHint.textContent = "的の位置を0.1秒ごとに自動補正中 — タップで手動調整できます";
         drawOverlay();
         if (monitoring) stopMonitoring();
         scheduleTargetTracking();
@@ -925,14 +927,13 @@
         previousCandidates = [];
         renderHits();
         monitoring = true;
-        if (trackingTimeoutId !== null) window.clearTimeout(trackingTimeoutId);
-        trackingTimeoutId = null;
         monitorButton.textContent = "監視中";
         setStatus("命中を監視中", "active");
-        cameraHint.textContent = "命中監視中 — 的の位置を0.5秒ごとに自動補正します";
+        cameraHint.textContent = "命中監視中 — 的の位置を0.1秒ごとに自動補正します";
         liveMessage.textContent = "監視を開始しました";
         monitorTarget = { x: target.x, y: target.y, r: target.r };
         targetTrackingMisses = 0;
+        lastFullTargetScanAt = Date.now();
         monitorFrame();
         return true;
       }
@@ -955,7 +956,7 @@
         target = null;
         baseline = null;
         targetState.textContent = "的を未検出";
-        cameraHint.textContent = "的を認識すると、位置を0.5秒ごとに自動補正します";
+        cameraHint.textContent = "的を認識すると、位置を0.1秒ごとに自動補正します";
         drawOverlay();
         setStatus("カメラ未接続", "idle");
       }
@@ -1022,9 +1023,10 @@
           target.confirmed = true;
           tapStage = 0;
           targetState.textContent = "的を手動設定・自動追跡中";
-          cameraHint.textContent = "的の位置を0.5秒ごとに自動補正中 — タップで手動調整できます";
+          cameraHint.textContent = "的の位置を0.1秒ごとに自動補正中 — タップで手動調整できます";
           drawOverlay();
           targetTrackingMisses = 0;
+          lastFullTargetScanAt = Date.now();
           if (monitoring && !rebaseMonitorBaseline()) {
             liveMessage.textContent = "映像を取得できず、監視基準を更新できませんでした。";
           }
