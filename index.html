@@ -152,10 +152,10 @@
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
       <p class="muted">斜め撮影では的の楕円形状を認識して補正します。認識後は位置・大きさを0.1秒ごとに自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="farTargetToggle"><span>遠距離検出（小さい的も探す）</span><input id="farTargetToggle" type="checkbox"></label>
-      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="48"><span id="sensitivityValue">48</span></label>
+      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="40"><span id="sensitivityValue">40</span></label>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
       <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
-      <p class="muted">穴候補は大きさ・形・暗さを確認し、連続する監視フレームで確認できた場合に加点します。一時的な影や光の変化による誤検出を抑えます。</p>
+      <p class="muted">穴候補は大きさ・形・暗い芯または明るい芯・周囲との明るさの差を確認し、連続する監視フレームで確認できた場合に加点します。一時的な影や光の変化による誤検出を抑えます。</p>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
 
@@ -905,7 +905,9 @@
             const index = liveY * width + liveX;
             const oldGray = sampleGray(baseline.data, width, height, x, y);
             const gray = sampleGray(data, width, height, liveX, liveY);
-            if (oldGray > 95 && oldGray - gray > threshold) {
+            const change = gray - oldGray;
+            if ((oldGray > 95 && change < -threshold) ||
+                (oldGray < 160 && change > threshold)) {
               const maskIndex = gy * cols + gx;
               mask[maskIndex] = 1;
               livePixelIndices[maskIndex] = index;
@@ -920,7 +922,7 @@
           seen[i] = 1;
           let head = 0, area = 0, sx = 0, sy = 0;
           let minGX = cols, maxGX = -1, minGY = rows, maxGY = -1;
-          let sumPreviousGray = 0, sumCurrentGray = 0;
+          let sumPreviousGray = 0, sumCurrentGray = 0, darkCorePixels = 0, brightCorePixels = 0;
           while (head < queue.length) {
             const p = queue[head++];
             const gx = p % cols, gy = Math.floor(p / cols);
@@ -933,9 +935,13 @@
             maxGX = Math.max(maxGX, gx);
             minGY = Math.min(minGY, gy);
             maxGY = Math.max(maxGY, gy);
-            sumPreviousGray += sampleGray(baseline.data, width, height, pixelX, pixelY);
+            const previousGray = sampleGray(baseline.data, width, height, pixelX, pixelY);
+            sumPreviousGray += previousGray;
             const currentPixelIndex = livePixelIndices[p];
-            sumCurrentGray += sampleGray(data, width, height, currentPixelIndex % width, Math.floor(currentPixelIndex / width));
+            const currentGray = sampleGray(data, width, height, currentPixelIndex % width, Math.floor(currentPixelIndex / width));
+            sumCurrentGray += currentGray;
+            if (previousGray > 95 && currentGray < 75) darkCorePixels++;
+            if (previousGray < 160 && currentGray > 180) brightCorePixels++;
             const neighbors = [p - 1, p + 1, p - cols, p + cols];
             for (const q of neighbors) {
               if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
@@ -945,7 +951,7 @@
             }
           }
           const areaPixels = area * step * step;
-          const minArea = Math.max(5, minSide * minSide * .000035);
+          const minArea = Math.max(3, minSide * minSide * .00002);
           const maxArea = Math.min(minSide * minSide * .006, Math.max(48, targetMinorRadius * targetMinorRadius * .05));
           const boundsWidth = (maxGX - minGX + 1) * step;
           const boundsHeight = (maxGY - minGY + 1) * step;
@@ -954,10 +960,42 @@
           const maxDiameter = Math.max(8, targetMinorRadius * .28);
           const meanCurrentGray = sumCurrentGray / area;
           const meanChange = (sumPreviousGray - sumCurrentGray) / area;
+          const corePixelCount = meanChange >= 0 ? darkCorePixels : brightCorePixels;
           if (areaPixels < minArea || areaPixels > maxArea ||
               boundsWidth > maxDiameter || boundsHeight > maxDiameter ||
-              aspect < .2 || aspect > 5 || compactness < .12 ||
-              meanCurrentGray > 180 || meanChange < Math.max(threshold + 10, 40)) continue;
+              aspect < .3 || aspect > 3.3 || compactness < .2 ||
+              corePixelCount < Math.max(2, Math.ceil(area * .25)) ||
+              (meanChange >= 0 && meanCurrentGray > 180) ||
+              (meanChange < 0 && meanCurrentGray < 100) ||
+              Math.abs(meanChange) < Math.max(threshold + 10, 40)) continue;
+          let ringPreviousGray = 0, ringCurrentGray = 0, ringSamples = 0;
+          const ringMargin = Math.max(2, Math.ceil(3 / step));
+          for (let ringY = Math.max(0, minGY - ringMargin); ringY <= Math.min(rows - 1, maxGY + ringMargin); ringY++) {
+            for (let ringX = Math.max(0, minGX - ringMargin); ringX <= Math.min(cols - 1, maxGX + ringMargin); ringX++) {
+              if (ringX >= minGX && ringX <= maxGX && ringY >= minGY && ringY <= maxGY) continue;
+              const referenceX = Math.min(width - 1, ringX * step);
+              const referenceY = Math.min(height - 1, ringY * step);
+              const referenceDx = referenceX - centerX, referenceDy = referenceY - centerY;
+              const localX = referenceDx * referenceCosine + referenceDy * referenceSine;
+              const localY = -referenceDx * referenceSine + referenceDy * referenceCosine;
+              if (Math.hypot(localX / referenceRadiusX, localY / referenceRadiusY) > .98) continue;
+              const targetLocalX = localX * targetRadiusX / referenceRadiusX;
+              const targetLocalY = localY * targetRadiusY / referenceRadiusY;
+              const liveX = Math.round(liveCenterX + targetLocalX * targetCosine - targetLocalY * targetSine);
+              const liveY = Math.round(liveCenterY + targetLocalX * targetSine + targetLocalY * targetCosine);
+              if (liveX < 0 || liveX >= width || liveY < 0 || liveY >= height) continue;
+              ringPreviousGray += sampleGray(baseline.data, width, height, referenceX, referenceY);
+              ringCurrentGray += sampleGray(data, width, height, liveX, liveY);
+              ringSamples++;
+            }
+          }
+          if (!ringSamples) continue;
+          const meanRingCurrentGray = ringCurrentGray / ringSamples;
+          const meanRingChange = (ringPreviousGray - ringCurrentGray) / ringSamples;
+          const localContrast = meanChange >= 0
+            ? meanRingCurrentGray - meanCurrentGray >= 16 && meanChange - meanRingChange >= Math.max(20, threshold * .4)
+            : meanCurrentGray - meanRingCurrentGray >= 16 && meanRingChange - meanChange >= Math.max(20, threshold * .4);
+          if (!localContrast) continue;
           const x = sx / area / width, y = sy / area / height;
           if (normalizedTargetDistance(x * width - centerX, y * height - centerY, referenceTarget, minSide) > .98) continue;
           candidates.push({ x, y, width: boundsWidth, height: boundsHeight, area: areaPixels });
@@ -1078,7 +1116,7 @@
               Math.sin(2 * ((target.angle || 0) - (monitorTarget.angle || 0))),
               Math.cos(2 * ((target.angle || 0) - (monitorTarget.angle || 0)))
             )) / 2;
-            if ((centerShift > 3 || radiusShift > 2 || angleShift * minSide > 2) && !rebaseMonitorBaseline()) {
+            if ((centerShift > 10 || radiusShift > 6 || angleShift * minSide > 6) && !rebaseMonitorBaseline()) {
               targetTrackingMisses = 1;
               liveMessage.textContent = "位置補正後の映像を取得できません。監視を続けながら再試行します。";
             }
