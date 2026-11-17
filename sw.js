@@ -1,4 +1,4 @@
-const CACHE_NAME = "target-score-v9";
+const CACHE_NAME = "target-score-v10";
 const APP_FILES = ["./", "./index.html", "./manifest.webmanifest", "./icon.svg", "./icon-180.png", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", event => {

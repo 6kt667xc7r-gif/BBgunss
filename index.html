@@ -152,10 +152,11 @@
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
       <p class="muted">斜め撮影では的の楕円形状を認識して補正します。認識後は位置・大きさを0.1秒ごとに自動補正します。映像をタップすると手動で調整できます。</p>
       <label class="setting" for="farTargetToggle"><span>遠距離検出（小さい的も探す）</span><input id="farTargetToggle" type="checkbox"></label>
-      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="40"><span id="sensitivityValue">40</span></label>
+      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="60"><span id="sensitivityValue">60</span></label>
+      <p class="muted">数値を上げるほど検出条件が厳しくなり、誤検出を抑えます。</p>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
       <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
-      <p class="muted">穴候補は大きさ・形・暗い芯または明るい芯・周囲との明るさの差を確認し、3回連続の監視フレームで確認できた場合に加点します。同じ場所の穴は再加点しません。</p>
+      <p class="muted">穴候補は暗い芯・小さく丸い形・周囲との明るさの差を確認し、4回連続で安定して検出された場合に加点します。同じ場所の穴は再加点しません。</p>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
 
@@ -911,8 +912,7 @@
             const oldGray = sampleGray(baseline.data, width, height, x, y);
             const gray = sampleGray(data, width, height, liveX, liveY);
             const change = gray - oldGray;
-            if ((oldGray > 95 && change < -threshold) ||
-                (oldGray < 160 && change > threshold)) {
+            if (oldGray > 110 && change < -threshold) {
               const maskIndex = gy * cols + gx;
               mask[maskIndex] = 1;
               livePixelIndices[maskIndex] = index;
@@ -927,7 +927,7 @@
           seen[i] = 1;
           let head = 0, area = 0, sx = 0, sy = 0;
           let minGX = cols, maxGX = -1, minGY = rows, maxGY = -1;
-          let sumPreviousGray = 0, sumCurrentGray = 0, darkCorePixels = 0, brightCorePixels = 0;
+          let sumPreviousGray = 0, sumCurrentGray = 0, darkCorePixels = 0;
           while (head < queue.length) {
             const p = queue[head++];
             const gx = p % cols, gy = Math.floor(p / cols);
@@ -945,8 +945,7 @@
             const currentPixelIndex = livePixelIndices[p];
             const currentGray = sampleGray(data, width, height, currentPixelIndex % width, Math.floor(currentPixelIndex / width));
             sumCurrentGray += currentGray;
-            if (previousGray > 95 && currentGray < 75) darkCorePixels++;
-            if (previousGray < 160 && currentGray > 180) brightCorePixels++;
+            if (previousGray > 110 && currentGray < 70) darkCorePixels++;
             const neighbors = [p - 1, p + 1, p - cols, p + cols];
             for (const q of neighbors) {
               if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
@@ -956,23 +955,22 @@
             }
           }
           const areaPixels = area * step * step;
-          const minArea = Math.max(3, minSide * minSide * .00002);
+          const minArea = Math.max(4, minSide * minSide * .000035);
           const maxArea = Math.min(minSide * minSide * .006, Math.max(48, targetMinorRadius * targetMinorRadius * .05));
           const boundsWidth = (maxGX - minGX + 1) * step;
           const boundsHeight = (maxGY - minGY + 1) * step;
           const aspect = boundsWidth / boundsHeight;
           const compactness = area / ((maxGX - minGX + 1) * (maxGY - minGY + 1));
-          const maxDiameter = Math.max(8, targetMinorRadius * .28);
+          const maxDiameter = Math.max(6, targetMinorRadius * .14);
+          const meanPreviousGray = sumPreviousGray / area;
           const meanCurrentGray = sumCurrentGray / area;
           const meanChange = (sumPreviousGray - sumCurrentGray) / area;
-          const corePixelCount = meanChange >= 0 ? darkCorePixels : brightCorePixels;
           if (areaPixels < minArea || areaPixels > maxArea ||
               boundsWidth > maxDiameter || boundsHeight > maxDiameter ||
-              aspect < .3 || aspect > 3.3 || compactness < .2 ||
-              corePixelCount < Math.max(2, Math.ceil(area * .25)) ||
-              (meanChange >= 0 && meanCurrentGray > 180) ||
-              (meanChange < 0 && meanCurrentGray < 100) ||
-              Math.abs(meanChange) < Math.max(threshold + 10, 40)) continue;
+              aspect < .55 || aspect > 1.8 || compactness < .4 ||
+              darkCorePixels < Math.max(3, Math.ceil(area * .5)) ||
+              meanPreviousGray < 125 || meanCurrentGray > 110 ||
+              meanChange < Math.max(threshold + 15, 55)) continue;
           let ringPreviousGray = 0, ringCurrentGray = 0, ringSamples = 0;
           const ringMargin = Math.max(2, Math.ceil(3 / step));
           for (let ringY = Math.max(0, minGY - ringMargin); ringY <= Math.min(rows - 1, maxGY + ringMargin); ringY++) {
@@ -997,9 +995,8 @@
           if (!ringSamples) continue;
           const meanRingCurrentGray = ringCurrentGray / ringSamples;
           const meanRingChange = (ringPreviousGray - ringCurrentGray) / ringSamples;
-          const localContrast = meanChange >= 0
-            ? meanRingCurrentGray - meanCurrentGray >= 16 && meanChange - meanRingChange >= Math.max(20, threshold * .4)
-            : meanCurrentGray - meanRingCurrentGray >= 16 && meanRingChange - meanChange >= Math.max(20, threshold * .4);
+          const localContrast = meanRingCurrentGray - meanCurrentGray >= 24 &&
+            meanChange - meanRingChange >= Math.max(24, threshold * .45);
           if (!localContrast) continue;
           const x = sx / area / width, y = sy / area / height;
           if (normalizedTargetDistance(x * width - centerX, y * height - centerY, referenceTarget, minSide) > .98) continue;
@@ -1050,11 +1047,14 @@
           if (target.confirmed && targetTrackingMisses === 0) {
             const candidates = detectCandidates(image);
             for (const candidate of candidates) {
-              const previousMatch = previousCandidates.find(old =>
-                Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12
-              );
+              const previousMatch = previousCandidates.find(old => {
+                const locationMatches =
+                  Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12;
+                const sizeMatches = candidate.area >= old.area * .65 && candidate.area <= old.area * 1.55;
+                return locationMatches && sizeMatches;
+              });
               candidate.confirmations = previousMatch ? previousMatch.confirmations + 1 : 1;
-              if (candidate.confirmations < 3) continue;
+              if (candidate.confirmations < 4) continue;
               const referenceTarget = monitorTarget || target;
               const minSide = Math.min(image.width, image.height);
               const targetPoint = normalizedTargetPoint(
