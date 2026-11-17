@@ -63,9 +63,6 @@
     input[type="checkbox"] { width: 20px; height: 20px; accent-color: #a7e278; }
     .hits { display: grid; gap: 7px; }
     .hit { display: flex; justify-content: space-between; align-items: center; padding: 9px 11px; border-radius: 9px; background: #253128; font-size: .86rem; }
-    .pending-hit { flex-wrap: wrap; gap: 8px; }
-    .pending-hit button { min-height: 38px; }
-    .pending-hit .confirm-hit { background: #a7e278; color: #152012; }
     .hit strong { color: #b9ee94; }
     .empty { color: #93a08e; text-align: center; padding: 12px 0 4px; font-size: .82rem; }
     .notice { margin: 12px 2px 0; color: #9baa97; font-size: .75rem; line-height: 1.6; }
@@ -155,19 +152,17 @@
       <div class="section-heading"><h2>検出設定</h2><span id="targetState" class="muted">的を未検出</span></div>
       <p class="muted">斜め撮影では的の楕円形状と傾きを追跡して補正します。認識後は位置・大きさ・角度を0.1秒ごとに自動補正します。揺れている間は判定を止め、画面が落ち着くと再開します。</p>
       <label class="setting" for="farTargetToggle"><span>遠距離検出（小さい的も探す）</span><input id="farTargetToggle" type="checkbox"></label>
-      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="60"><span id="sensitivityValue">60</span></label>
+      <label class="setting" for="sensitivity"><span>穴の検出感度</span><input id="sensitivity" type="range" min="25" max="90" value="65"><span id="sensitivityValue">65</span></label>
       <p class="muted">数値を上げるほど検出条件が厳しくなり、誤検出を抑えます。</p>
-      <label class="setting" for="hitConfirmationToggle"><span>候補を確認してから加点（誤得点防止）</span><input id="hitConfirmationToggle" type="checkbox" checked></label>
-      <p class="muted">ONでは穴候補を目視確認して「穴を確認して加点」を押すまで得点に入りません。OFFでは検出後に自動加点します。</p>
+      <p class="muted">誤得点防止は自動で行います。小さく丸い暗い穴だけを候補にし、揺れが収まり、同じ形・位置で6回連続した場合だけ自動加点します。</p>
       <label class="setting" for="hitVoiceToggle"><span>1発ごとの得点を音声で読み上げ</span><input id="hitVoiceToggle" type="checkbox" aria-label="1発ごとの得点を音声で読み上げる"></label>
       <p class="muted">OFFが初期設定です。競技終了時の合計点は音声で読み上げます。</p>
-      <p class="muted">穴候補は暗い芯・小さく丸い形・周囲との明るさの差を確認し、4回連続で安定して検出します。揺れや傾きを検知している間は判定を一時停止し、安定後に再開します。</p>
+      <p class="muted">同じ場所に得点済みの穴は再加点しません。穴に似た影や反射を完全に見分けられない場合があるため、感度を上げるほど検出条件が厳しくなります。</p>
       <p class="muted">添付の的に合わせ、中心から半径10%以内が10点、10〜20%が9点、20〜39%が8点、39〜56%が7点、56〜80%が6点、外側が5点です。</p>
     </section>
 
     <section class="card section">
       <div class="section-heading"><h2>命中履歴</h2><button id="undoButton" disabled>取り消し</button></div>
-      <div id="pendingHits" class="hits"></div>
       <div id="hits" class="hits"><div class="empty">監視を開始すると、新しいBB弾の穴を記録します。</div></div>
       <div class="controls" style="padding:12px 0 0">
         <button id="resetButton" disabled>スコアをリセット</button>
@@ -202,7 +197,6 @@
       const rapidDuration = document.getElementById("rapidDuration");
       const rapidCountdown = document.getElementById("rapidCountdown");
       const rapidTimer = document.getElementById("rapidTimer");
-      const hitConfirmationToggle = document.getElementById("hitConfirmationToggle");
       const hitVoiceToggle = document.getElementById("hitVoiceToggle");
       const stopButton = document.getElementById("stopButton");
       const resetButton = document.getElementById("resetButton");
@@ -212,7 +206,6 @@
       const targetState = document.getElementById("targetState");
       const placeholder = document.getElementById("placeholder");
       const cameraHint = document.getElementById("cameraHint");
-      const pendingHitsElement = document.getElementById("pendingHits");
       const hitsElement = document.getElementById("hits");
       const totalElement = document.getElementById("total");
       const countElement = document.getElementById("count");
@@ -235,16 +228,12 @@
       let lastFullTargetScanAt = 0;
       let audioContext = null;
       let hits = [];
-      let pendingHits = [];
-      let dismissedCandidates = [];
-      let nextPendingHitId = 1;
       let previousCandidates = [];
       let tapStage = 0;
       let rapidPhase = "idle";
       let countdownId = null;
       let rapidIntervalId = null;
       let rapidDeadline = 0;
-      let lastTrainingReason = null;
 
       function setStatus(text, state) {
         statusText.textContent = text;
@@ -1097,24 +1086,9 @@
         totalElement.textContent = String(total);
         countElement.textContent = String(hits.length);
         undoButton.disabled = hits.length === 0;
-        resetButton.disabled = hits.length === 0 && pendingHits.length === 0;
-        pendingHitsElement.replaceChildren(...pendingHits.slice().reverse().map((hit, index) => {
-          const row = document.createElement("div");
-          row.className = "hit pending-hit";
-          const label = document.createElement("span");
-          label.textContent = `穴候補 ${pendingHits.length - index}・${hit.score}点 — 確認してください`;
-          const confirm = document.createElement("button");
-          confirm.className = "confirm-hit";
-          confirm.textContent = "穴を確認して加点";
-          confirm.addEventListener("click", () => confirmPendingHit(hit.id));
-          const reject = document.createElement("button");
-          reject.textContent = "誤検出";
-          reject.addEventListener("click", () => rejectPendingHit(hit.id));
-          row.append(label, confirm, reject);
-          return row;
-        }));
+        resetButton.disabled = hits.length === 0;
         if (!hits.length) {
-          hitsElement.innerHTML = `<div class="empty">${pendingHits.length ? "確認済みの命中はありません。" : "監視を開始すると、新しいBB弾の穴を記録します。"}</div>`;
+          hitsElement.innerHTML = '<div class="empty">監視を開始すると、新しいBB弾の穴を記録します。</div>';
           return;
         }
         hitsElement.replaceChildren(...hits.slice().reverse().map((hit, index) => {
@@ -1129,46 +1103,31 @@
         }));
       }
 
+      function candidateConfirmationCount(candidate, previousCandidates, width, height) {
+        const previousMatch = previousCandidates.find(old => {
+          const locationMatches =
+            Math.hypot((old.x - candidate.x) * width, (old.y - candidate.y) * height) < 6;
+          const sizeMatches = candidate.area >= old.area * .8 && candidate.area <= old.area * 1.25;
+          return locationMatches && sizeMatches;
+        });
+        return previousMatch ? previousMatch.confirmations + 1 : 1;
+      }
+
       function recordHit(hit) {
         hits.push(hit);
         renderHits();
         liveMessage.textContent = `${hit.score}点で命中を確定しました`;
         if (hitVoiceToggle.checked) speakJapanese(`${hit.score}点です`);
-        if (hit.training && rapidPhase === "finished") {
-          const total = hits.reduce((sum, item) => sum + item.score, 0);
-          const average = (total / hits.length).toFixed(1);
-          const ending = lastTrainingReason === "shots" ? "設定数に到達" : "時間終了";
-          trainingResult.textContent = trainingMode.value === "accuracy"
-            ? `${currentTrainingName()}結果（${ending}）：${hits.length}発、合計${total}点、平均${average}点`
-            : `早撃ち結果（${ending}）：${hits.length}発、合計${total}点`;
-          speakJapanese(`修正後の合計は${total}点です。`);
-        }
         if (hits.length >= Number(shotLimit.value) && rapidPhase === "running") {
           finishTrainingRound("shots");
         }
-      }
-
-      function confirmPendingHit(id) {
-        const index = pendingHits.findIndex(hit => hit.id === id);
-        if (index < 0) return;
-        const [hit] = pendingHits.splice(index, 1);
-        recordHit(hit);
-      }
-
-      function rejectPendingHit(id) {
-        const index = pendingHits.findIndex(hit => hit.id === id);
-        if (index < 0) return;
-        const [hit] = pendingHits.splice(index, 1);
-        dismissedCandidates.push({ targetX: hit.targetX, targetY: hit.targetY });
-        renderHits();
-        liveMessage.textContent = "候補を誤検出として除外しました";
       }
 
       function monitorFrame() {
         if (!monitoring || !baseline || !target || video.readyState < 2) return;
         const frameStartedAt = Date.now();
         try {
-          const image = videoImage(320);
+          const image = videoImage(480);
           if (!image) return;
           if (target.confirmed && targetTrackingMisses === 0 && stableTrackingFrames >= stableTrackingFramesRequired) {
             if (cameraHint.textContent.startsWith("揺れ")) {
@@ -1176,14 +1135,13 @@
             }
             const candidates = detectCandidates(image);
             for (const candidate of candidates) {
-              const previousMatch = previousCandidates.find(old => {
-                const locationMatches =
-                  Math.hypot((old.x - candidate.x) * image.width, (old.y - candidate.y) * image.height) < 12;
-                const sizeMatches = candidate.area >= old.area * .65 && candidate.area <= old.area * 1.55;
-                return locationMatches && sizeMatches;
-              });
-              candidate.confirmations = previousMatch ? previousMatch.confirmations + 1 : 1;
-              if (candidate.confirmations < 4) continue;
+              candidate.confirmations = candidateConfirmationCount(
+                candidate,
+                previousCandidates,
+                image.width,
+                image.height
+              );
+              if (candidate.confirmations < 6) continue;
               const referenceTarget = monitorTarget || target;
               const minSide = Math.min(image.width, image.height);
               const targetPoint = normalizedTargetPoint(
@@ -1195,10 +1153,6 @@
               const nearRecorded = hits.some(hit =>
                 Number.isFinite(hit.targetX) && Number.isFinite(hit.targetY) &&
                 Math.hypot(hit.targetX - targetPoint.x, hit.targetY - targetPoint.y) < .12
-              ) || pendingHits.some(hit =>
-                Math.hypot(hit.targetX - targetPoint.x, hit.targetY - targetPoint.y) < .12
-              ) || dismissedCandidates.some(hit =>
-                Math.hypot(hit.targetX - targetPoint.x, hit.targetY - targetPoint.y) < .12
               );
               if (nearRecorded) continue;
               const score = scoreHit(targetPoint);
@@ -1207,18 +1161,10 @@
                   ...candidate,
                   targetX: targetPoint.x,
                   targetY: targetPoint.y,
-                  score,
-                  training: rapidPhase === "running",
-                  id: nextPendingHitId++
+                  score
                 };
-                if (hitConfirmationToggle.checked) {
-                  pendingHits.push(hit);
-                  renderHits();
-                  liveMessage.textContent = `${score}点の穴候補です。実際に穴が開いているか確認してください。`;
-                } else {
-                  recordHit(hit);
-                  if (!monitoring) return;
-                }
+                recordHit(hit);
+                if (!monitoring) return;
               }
             }
             previousCandidates = candidates;
@@ -1237,7 +1183,7 @@
       }
 
       function rebaseMonitorBaseline() {
-        const image = videoImage(320);
+        const image = videoImage(480);
         if (!image) return false;
         baseline = image;
         monitorTarget = { ...target };
@@ -1387,7 +1333,6 @@
         prepareAudioContext();
         const countdownSeconds = Number(rapidCountdown.value);
         const countdownEnds = Date.now() + countdownSeconds * 1000;
-        lastTrainingReason = null;
         rapidPhase = "countdown";
         updateZoomControl();
         rapidDuration.disabled = true;
@@ -1435,7 +1380,6 @@
       function finishTrainingRound(reason) {
         if (rapidIntervalId !== null) window.clearInterval(rapidIntervalId);
         rapidIntervalId = null;
-        lastTrainingReason = reason;
         rapidPhase = "finishing";
         if (loopId !== null) window.clearTimeout(loopId);
         loopId = null;
@@ -1548,12 +1492,10 @@
       }
 
       function beginMonitoring() {
-        const image = videoImage(320);
+        const image = videoImage(480);
         if (!image) return false;
         baseline = image;
         hits = [];
-        pendingHits = [];
-        dismissedCandidates = [];
         previousCandidates = [];
         renderHits();
         monitoring = true;
@@ -1650,8 +1592,6 @@
       stopButton.addEventListener("click", stopCamera);
       resetButton.addEventListener("click", () => {
         hits = [];
-        pendingHits = [];
-        dismissedCandidates = [];
         previousCandidates = [];
         if (monitoring && !rebaseMonitorBaseline()) {
           liveMessage.textContent = "スコアはリセットしましたが、映像を取得できず監視基準を更新できませんでした。";
